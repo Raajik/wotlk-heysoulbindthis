@@ -1,0 +1,76 @@
+name: Release Addon
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to release (e.g. v1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          case "$VERSION" in
+            v*) ;;
+            *) VERSION="v${VERSION}" ;;
+          esac
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Packaging release ${VERSION}"
+
+      - name: Package HeySoulbindThis zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f HeySoulbindThis/HeySoulbindThis.toc
+          test -f HeySoulbindThis/HeySoulbindThis.lua
+
+          # Zip keeps the HeySoulbindThis/ folder so extract-into-AddOns works
+          zip -r "HeySoulbindThis-${{ steps.ver.outputs.version }}.zip" HeySoulbindThis \
+            -x "*.DS_Store" -x "*Thumbs.db" -x "*.git*"
+          cp "HeySoulbindThis-${{ steps.ver.outputs.version }}.zip" HeySoulbindThis.zip
+
+          echo "Zip contents:"
+          unzip -l HeySoulbindThis.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: HeySoulbindThis ${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            HeySoulbindThis.zip
+            HeySoulbindThis-${{ steps.ver.outputs.version }}.zip
+          body: |
+            ## Install
+            1. Download **HeySoulbindThis.zip**
+            2. Extract it into your WoW `Interface\AddOns\` folder
+            3. Confirm you have `Interface\AddOns\HeySoulbindThis\HeySoulbindThis.toc`
+            4. Restart the client or `/reload`
+
+            Chat should show `[HeySoulbindThis] Loaded ...` on login.
