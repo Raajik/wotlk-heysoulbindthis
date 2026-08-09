@@ -1,13 +1,15 @@
 local addonName = "HeySoulbindThis"
-local ADDON_BUILD = "2026-08-09m"
+local ADDON_BUILD = "2026-08-09q"
 
 -- =====================================================================
 -- 0. CONFIG / CONSTANTS
 -- =====================================================================
 local CHAT_PREFIX = "|cff33ff99[HeySoulbindThis]|r "
 local MAX_ATTACHMENTS = 12
-local BATCH_DELAY = 1.0
-local BAG_SETTLE_DELAY = 0.35
+local BATCH_DELAY = 0.85
+local BAG_SETTLE_DELAY = 0.25
+local TAB_SWITCH_DELAY = 0.15
+local MAX_EMPTY_BATCH_STREAK = 10
 local PANEL_WIDTH = 520
 local PANEL_HEIGHT = 500
 local ROW_HEIGHT = 18
@@ -205,6 +207,7 @@ local sendBatchTotal = 0
 -- Names that hit "unique mail recipients" / full inbox this send session
 local mailBlockedRecipients = {}
 local lastMailUIError
+local emptyBatchStreak = 0
 local scanTip
 local OPEN_DELAY = 0.35
 local MAX_INBOX_ATTACH = ATTACHMENTS_MAX_RECEIVE or 16
@@ -771,15 +774,18 @@ MatchWeaponCategory = function(itemSubType)
     if s:find("fish", 1, true) then
         return nil
     end
+    -- Word-boundary wand match avoids "Wandering" / similar name false hits
+    if string.find(s, "%f[%a]wands?%f[%a]") or s == "wand" or s == "wands" then
+        return "Wand"
+    end
     if s:find("fist", 1, true) then return "Fist" end
     if s:find("dagger", 1, true) then return "Dagger" end
     if s:find("thrown", 1, true) then return "Thrown" end
-    if s:find("wand", 1, true) then return "Wand" end
     if s:find("crossbow", 1, true) then return "Crossbow" end
     if s:find("polearm", 1, true) then return "Polearm" end
     if s:find("staff", 1, true) or s:find("stave", 1, true) then return "Staff" end
     if s:find("bow", 1, true) and not s:find("cross", 1, true) then return "Bow" end
-    if s:find("gun", 1, true) then return "Gun" end
+    if s:find("gun", 1, true) or s:find("rifle", 1, true) then return "Gun" end
     local oneHand = s:find("one%-hand") or s:find("one hand") or s:find("1h")
     local twoHand = s:find("two%-hand") or s:find("two hand") or s:find("2h")
     if s:find("axe", 1, true) then
@@ -795,6 +801,153 @@ MatchWeaponCategory = function(itemSubType)
     if idx and WEAPON_CATEGORY[idx] and WEAPON_CATEGORY[idx] ~= "Fishing" then
         return WEAPON_CATEGORY[idx]
     end
+    return nil
+end
+
+-- Disambiguate INVTYPE_RANGEDRIGHT (wand/gun/crossbow share it in WotLK).
+local function MatchRangedCategory(itemSubType, itemName, equipLoc)
+    local cat = MatchWeaponCategory(itemSubType)
+    if cat == "Wand" or cat == "Gun" or cat == "Crossbow" or cat == "Bow"
+        or cat == "Thrown" then
+        return cat
+    end
+    local n = string.lower(tostring(itemName or ""))
+    if string.find(n, "%f[%a]wands?%f[%a]") then
+        return "Wand"
+    end
+    if n:find("crossbow", 1, true) then return "Crossbow" end
+    if n:find("rifle", 1, true) or string.find(n, "%f[%a]guns?%f[%a]") then
+        return "Gun"
+    end
+    if equipLoc == "INVTYPE_THROWN" then return "Thrown" end
+    if equipLoc == "INVTYPE_RANGED" then return "Bow" end
+    return cat
+end
+
+-- Returns category label, routeKey (Cloth/Weapon/etc), optional weaponIndex/relicIndex
+ClassifyItem = function(bag, slot, itemName, itemType, itemSubType, reqLevel, equipLoc)
+    if equipLoc == "INVTYPE_BODY" or equipLoc == "INVTYPE_TABARD"
+        or equipLoc == "INVTYPE_BAG" or equipLoc == "INVTYPE_AMMO"
+        or equipLoc == "INVTYPE_QUIVER" then
+        return nil
+    end
+
+    if IsLockbox(bag, slot, itemName) then
+        return "Lockbox", "Lockbox"
+    end
+
+    if equipLoc and WILDCARD_SLOTS[equipLoc] then
+        return "Wildcard", "Wildcard"
+    end
+
+    -- Off-hand frills (tomes, orbs, lanterns) — not wands
+    if equipLoc == "INVTYPE_HOLDABLE" then
+        return "Offhand", "Offhand"
+    end
+
+    -- Ranged slot first: wands share INVTYPE_RANGEDRIGHT with guns/crossbows
+    if equipLoc == "INVTYPE_RANGEDRIGHT" or equipLoc == "INVTYPE_RANGED"
+        or equipLoc == "INVTYPE_THROWN" then
+        local rangedCat = MatchRangedCategory(itemSubType, itemName, equipLoc)
+        if not rangedCat and bag and slot then
+            -- Tooltip line sometimes says Wand when subtype is blank/misc
+            local tip = GetScanTooltip()
+            tip:SetOwner(UIParent, "ANCHOR_NONE")
+            tip:ClearLines()
+            if pcall(tip.SetBagItem, tip, bag, slot) then
+                for _, text in ipairs(ReadScanTooltipLines(tip)) do
+                    local low = string.lower(text)
+                    if string.find(low, "%f[%a]wands?%f[%a]") then
+                        rangedCat = "Wand"
+                        break
+                    end
+                    if low:find("crossbow", 1, true) then
+                        rangedCat = "Crossbow"
+                        break
+                    end
+                    if low == "gun" or low == "guns" then
+                        rangedCat = "Gun"
+                        break
+                    end
+                end
+            end
+        end
+        if rangedCat then
+            return rangedCat, "Weapon", rangedCat
+        end
+    end
+
+    -- Weapons (including fist / weapon-offhand)
+    local weaponCat = MatchWeaponCategory(itemSubType)
+    if not weaponCat then
+        weaponCat = MatchWeaponCategory(itemName)
+        -- Reject wand false-positives already handled via frontier pattern
+    end
+    if itemType == weaponClassName or (equipLoc == "INVTYPE_WEAPON"
+        or equipLoc == "INVTYPE_2HWEAPON" or equipLoc == "INVTYPE_WEAPONMAINHAND"
+        or equipLoc == "INVTYPE_WEAPONOFFHAND" or equipLoc == "INVTYPE_RANGED"
+        or equipLoc == "INVTYPE_THROWN" or equipLoc == "INVTYPE_RANGEDRIGHT") then
+        if weaponCat then
+            return weaponCat, "Weapon", weaponCat
+        end
+    end
+
+    -- Known weapon subtype even if itemType/equipLoc is odd on private servers
+    if weaponCat == "Wand" or weaponCat == "Fist" or weaponCat == "Bow"
+        or weaponCat == "Gun" or weaponCat == "Crossbow" or weaponCat == "Thrown"
+        or weaponCat == "Dagger" or weaponCat == "Staff"
+        or weaponCat == "1H Axe" or weaponCat == "2H Axe"
+        or weaponCat == "1H Mace" or weaponCat == "2H Mace"
+        or weaponCat == "1H Sword" or weaponCat == "2H Sword"
+        or weaponCat == "Polearm" then
+        return weaponCat, "Weapon", weaponCat
+    end
+
+    -- Weapon-offhand with no recognized weapon subtype = offhand frill
+    if equipLoc == "INVTYPE_WEAPONOFFHAND" then
+        return "Offhand", "Offhand"
+    end
+
+    if itemType == armorClassName or (itemType and armorClassName and itemType == armorClassName) then
+        local idx = armorSubNames[itemSubType]
+        if not idx then
+            -- Fallback: subtype text
+            local s = string.lower(tostring(itemSubType or ""))
+            if s:find("shield", 1, true) then
+                return "Shield", "Shield"
+            end
+            if s == "miscellaneous" or s == "misc" then
+                if equipLoc == "INVTYPE_HOLDABLE" or equipLoc == "INVTYPE_WEAPONOFFHAND" then
+                    return "Offhand", "Offhand"
+                end
+            end
+            return nil
+        end
+
+        if idx == ARMOR_SUB.SHIELD then
+            return "Shield", "Shield"
+        end
+        if CLASS_RELICS[idx] then
+            return ARMOR_CATEGORY[idx], "Relic", nil, idx
+        end
+        if idx == ARMOR_SUB.CLOTH or idx == ARMOR_SUB.LEATHER
+            or idx == ARMOR_SUB.MAIL or idx == ARMOR_SUB.PLATE then
+            return ARMOR_CATEGORY[idx], ARMOR_CATEGORY[idx]
+        end
+        -- Misc armor holdables
+        if idx == ARMOR_SUB.MISC and (equipLoc == "INVTYPE_HOLDABLE" or equipLoc == "INVTYPE_WEAPONOFFHAND") then
+            return "Offhand", "Offhand"
+        end
+    end
+
+    -- Last-chance offhand / fist by subtype alone
+    if weaponCat == "Fist" then
+        return "Fist", "Weapon", "Fist"
+    end
+    if equipLoc == "INVTYPE_HOLDABLE" then
+        return "Offhand", "Offhand"
+    end
+
     return nil
 end
 
@@ -884,97 +1037,28 @@ end
 local function RecipientAlreadyHas(assigned, recipKey, itemID, mythicTier)
     if not assigned[recipKey] then return false end
     if not assigned[recipKey][itemID] then return false end
-    return assigned[recipKey][itemID][mythicTier] == true
+    local v = assigned[recipKey][itemID][mythicTier]
+    if type(v) == "number" then return v > 0 end
+    return v == true
+end
+
+local function RecipientHasCount(assigned, recipKey, itemID, mythicTier)
+    if not assigned[recipKey] or not assigned[recipKey][itemID] then return 0 end
+    local v = assigned[recipKey][itemID][mythicTier]
+    if type(v) == "number" then return v end
+    if v then return 1 end
+    return 0
 end
 
 local function MarkRecipientHas(assigned, recipKey, itemID, mythicTier)
     assigned[recipKey] = assigned[recipKey] or {}
     assigned[recipKey][itemID] = assigned[recipKey][itemID] or {}
-    assigned[recipKey][itemID][mythicTier] = true
+    local n = RecipientHasCount(assigned, recipKey, itemID, mythicTier)
+    assigned[recipKey][itemID][mythicTier] = n + 1
 end
 
 local function CanUseWeapon(classFile, weaponCategory)
     return CLASS_WEAPONS[classFile] and CLASS_WEAPONS[classFile][weaponCategory] or false
-end
-
--- Returns category label, routeKey (Cloth/Weapon/etc), optional weaponIndex/relicIndex
-ClassifyItem = function(bag, slot, itemName, itemType, itemSubType, reqLevel, equipLoc)
-    if equipLoc == "INVTYPE_BODY" or equipLoc == "INVTYPE_TABARD"
-        or equipLoc == "INVTYPE_BAG" or equipLoc == "INVTYPE_AMMO"
-        or equipLoc == "INVTYPE_QUIVER" then
-        return nil
-    end
-
-    if IsLockbox(bag, slot, itemName) then
-        return "Lockbox", "Lockbox"
-    end
-
-    if equipLoc and WILDCARD_SLOTS[equipLoc] then
-        return "Wildcard", "Wildcard"
-    end
-
-    -- Off-hand frills (tomes, orbs, lanterns)
-    if equipLoc == "INVTYPE_HOLDABLE" then
-        return "Offhand", "Offhand"
-    end
-
-    -- Weapons (including fist / weapon-offhand)
-    local weaponCat = MatchWeaponCategory(itemSubType)
-    if itemType == weaponClassName or (equipLoc == "INVTYPE_WEAPON"
-        or equipLoc == "INVTYPE_2HWEAPON" or equipLoc == "INVTYPE_WEAPONMAINHAND"
-        or equipLoc == "INVTYPE_WEAPONOFFHAND" or equipLoc == "INVTYPE_RANGED"
-        or equipLoc == "INVTYPE_THROWN" or equipLoc == "INVTYPE_RANGEDRIGHT") then
-        if weaponCat then
-            return weaponCat, "Weapon", weaponCat
-        end
-    end
-
-    -- Weapon-offhand with no recognized weapon subtype = offhand frill
-    if equipLoc == "INVTYPE_WEAPONOFFHAND" then
-        return "Offhand", "Offhand"
-    end
-
-    if itemType == armorClassName or (itemType and armorClassName and itemType == armorClassName) then
-        local idx = armorSubNames[itemSubType]
-        if not idx then
-            -- Fallback: subtype text
-            local s = string.lower(tostring(itemSubType or ""))
-            if s:find("shield", 1, true) then
-                return "Shield", "Shield"
-            end
-            if s == "miscellaneous" or s == "misc" then
-                if equipLoc == "INVTYPE_HOLDABLE" or equipLoc == "INVTYPE_WEAPONOFFHAND" then
-                    return "Offhand", "Offhand"
-                end
-            end
-            return nil
-        end
-
-        if idx == ARMOR_SUB.SHIELD then
-            return "Shield", "Shield"
-        end
-        if CLASS_RELICS[idx] then
-            return ARMOR_CATEGORY[idx], "Relic", nil, idx
-        end
-        if idx == ARMOR_SUB.CLOTH or idx == ARMOR_SUB.LEATHER
-            or idx == ARMOR_SUB.MAIL or idx == ARMOR_SUB.PLATE then
-            return ARMOR_CATEGORY[idx], ARMOR_CATEGORY[idx]
-        end
-        -- Misc armor holdables
-        if idx == ARMOR_SUB.MISC and (equipLoc == "INVTYPE_HOLDABLE" or equipLoc == "INVTYPE_WEAPONOFFHAND") then
-            return "Offhand", "Offhand"
-        end
-    end
-
-    -- Last-chance offhand / fist by subtype alone
-    if weaponCat == "Fist" then
-        return "Fist", "Weapon", "Fist"
-    end
-    if equipLoc == "INVTYPE_HOLDABLE" then
-        return "Offhand", "Offhand"
-    end
-
-    return nil
 end
 
 local function GetAssigneesInPriorityOrder()
@@ -1130,12 +1214,33 @@ ResolveRecipient = function(routeKey, weaponCategory, relicIndex, reqLevel, cate
     assigned = assigned or {}
     mythicTier = mythicTier or 0
 
-    for _, entry in ipairs(ListEligibleRecipients(routeKey, weaponCategory, relicIndex, reqLevel, category)) do
+    local list = ListEligibleRecipients(routeKey, weaponCategory, relicIndex, reqLevel, category)
+
+    -- Prefer someone who does not already have this itemID@tier this scan
+    for _, entry in ipairs(list) do
         local key, data = TryCandidate(entry.key, nil, assigned, itemID, mythicTier)
         if key then
             MarkRecipientHas(assigned, key, itemID, mythicTier)
             return key, data
         end
+    end
+
+    -- Overflow: every eligible already got one copy. Still assign so Send All
+    -- clears bags in one pass — spread extras to whoever has the fewest.
+    if #list == 0 then
+        return nil
+    end
+    local best, bestCount = nil, nil
+    for _, entry in ipairs(list) do
+        local c = RecipientHasCount(assigned, entry.key, itemID, mythicTier)
+        if not best or c < bestCount then
+            best = entry
+            bestCount = c
+        end
+    end
+    if best then
+        MarkRecipientHas(assigned, best.key, itemID, mythicTier)
+        return best.key, best.data
     end
     return nil
 end
@@ -1338,39 +1443,44 @@ end
 local function AttachItem(bag, slot, attachIndex)
     ClearCursor()
     PickupContainerItem(bag, slot)
-    if CursorHasItem() then
-        ClickSendMailItemButton(attachIndex)
+    if not CursorHasItem() then
+        return false
+    end
+    ClickSendMailItemButton(attachIndex)
+    -- Only treat as attached if the mail slot actually took the item.
+    -- Returning true on Click alone caused 1-item leftovers after Done.
+    if GetSendMailItem and GetSendMailItem(attachIndex) then
         ClearCursor()
         return true
     end
-    ClearCursor()
+    if CursorHasItem() then
+        ClearCursor()
+    end
     return false
 end
 
--- After a successful send, bag slots compact. Relocate each queued item by
--- itemID (+ mythic tier when known) so later batches still find the gear.
-local function FindSendableSlot(itemID, mythicTier, preferBag, preferSlot, usedSlots)
+local function CountSendMailAttachments()
+    local n = 0
+    if not GetSendMailItem then return n end
+    for i = 1, MAX_ATTACHMENTS do
+        if GetSendMailItem(i) then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+-- Relocate by itemID only. No usedSlots map: after a real attach the item is
+-- on the mail form (not in bags), and bag:slot locks break when slots compact.
+local function FindSendableSlot(itemID, preferBag, preferSlot)
     if not itemID then return nil end
 
     local function slotOk(bag, slot)
-        local key = bag .. ":" .. slot
-        if usedSlots and usedSlots[key] then
-            return false
-        end
         local link = GetContainerItemLink(bag, slot)
-        if not link or GetItemIDFromLink(link) ~= itemID then
+        if not link then
             return false
         end
-        local want = tonumber(mythicTier) or 0
-        if want > 0 then
-            local got = GetMythicTier(bag, slot, nil) or 0
-            -- Only reject when we positively read a different tier; 0 means
-            -- tooltip not ready yet and should not block attach.
-            if got > 0 and got ~= want then
-                return false
-            end
-        end
-        return true
+        return GetItemIDFromLink(link) == itemID
     end
 
     if preferBag and preferSlot and slotOk(preferBag, preferSlot) then
@@ -1388,17 +1498,13 @@ local function FindSendableSlot(itemID, mythicTier, preferBag, preferSlot, usedS
     return nil
 end
 
-local function RelocateEntry(entry, usedSlots)
-    local bag, slot = FindSendableSlot(
-        entry.itemID, entry.mythicTier, entry.bag, entry.slot, usedSlots)
+local function RelocateEntry(entry)
+    local bag, slot = FindSendableSlot(entry.itemID, entry.bag, entry.slot)
     if not bag then
         return false
     end
     entry.bag = bag
     entry.slot = slot
-    if usedSlots then
-        usedSlots[bag .. ":" .. slot] = true
-    end
     return true
 end
 
@@ -1409,6 +1515,7 @@ StopSending = function()
     sendQueue = {}
     mailBlockedRecipients = {}
     lastMailUIError = nil
+    emptyBatchStreak = 0
     if panel and panel.stopBtn then
         panel.stopBtn:Disable()
     end
@@ -1440,6 +1547,25 @@ local function PrependQueueGrouped(entries)
     sendQueue = rebuilt
 end
 
+local function AppendQueueGrouped(entries)
+    if not entries or #entries == 0 then return end
+    local byRecip = {}
+    local order = {}
+    for _, entry in ipairs(entries) do
+        local name = entry.recipient
+        if not byRecip[name] then
+            byRecip[name] = {}
+            order[#order + 1] = name
+        end
+        byRecip[name][#byRecip[name] + 1] = entry
+    end
+    for _, name in ipairs(order) do
+        for _, item in ipairs(byRecip[name]) do
+            sendQueue[#sendQueue + 1] = item
+        end
+    end
+end
+
 -- Reroute a failed batch to route backups. Returns true if any items were requeued.
 local function FailoverBatch(batch, failedRecipient)
     mailBlockedRecipients[failedRecipient] = true
@@ -1462,7 +1588,6 @@ local function FailoverBatch(batch, failedRecipient)
 
     if #rerouted > 0 then
         PrependQueueGrouped(rerouted)
-        -- Extra batches for the rerouted items
         local i = 1
         local extra = 0
         while i <= #rerouted do
@@ -1489,112 +1614,114 @@ local function FailoverBatch(batch, failedRecipient)
     return #rerouted > 0
 end
 
-SendNextBatch = function()
-    if stopRequested then
-        sending = false
-        UpdateSendButton()
-        return
+local function FinishSending(msg)
+    sending = false
+    ClearMailAttachments()
+    mailBlockedRecipients = {}
+    lastMailUIError = nil
+    emptyBatchStreak = 0
+    if msg then Print(msg) end
+    if panel and panel.stopBtn then
+        panel.stopBtn:Disable()
     end
+    UpdateSendButton()
+    RefreshPreview()
+end
 
-    if not MailboxOpen() then
-        sending = false
-        Print("|cffff0000Mailbox closed - send cancelled.|r")
-        UpdateSendButton()
-        return
-    end
-
-    if #sendQueue == 0 then
-        sending = false
-        ClearMailAttachments()
-        mailBlockedRecipients = {}
-        lastMailUIError = nil
-        Print("|cff00ff00Done.|r All batches sent.")
-        if panel and panel.stopBtn then
-            panel.stopBtn:Disable()
+-- Wait for bags to reflect mailed items before the next batch.
+local function ContinueAfterBagsSettle()
+    local f = CreateFrame("Frame")
+    local elapsed = 0
+    local sawBag = false
+    local minWait = BAG_SETTLE_DELAY
+    f:RegisterEvent("BAG_UPDATE")
+    f:SetScript("OnEvent", function()
+        sawBag = true
+    end)
+    f:SetScript("OnUpdate", function(self, e)
+        elapsed = elapsed + e
+        if stopRequested then
+            self:UnregisterAllEvents()
+            self:SetScript("OnUpdate", nil)
+            return
         end
-        UpdateSendButton()
-        RefreshPreview()
-        return
-    end
-
-    local function ContinueAfterDelay(extraDelay)
-        local f = CreateFrame("Frame")
-        local t = 0
-        local need = (extraDelay or 0) + BATCH_DELAY
-        f:SetScript("OnUpdate", function(self, e)
-            t = t + e
-            if t >= need then
-                self:SetScript("OnUpdate", nil)
-                SendNextBatch()
-            end
-        end)
-    end
-
-    -- Peek recipient for this batch - keep same recipient until 12 or recipient changes
-    local recipient = sendQueue[1].recipient
-    local batch = {}
-    while #batch < MAX_ATTACHMENTS and #sendQueue > 0 do
-        if sendQueue[1].recipient ~= recipient then
-            break
+        -- Prefer a bag update, but don't hang forever
+        if (sawBag and elapsed >= minWait) or elapsed >= 2.0 then
+            self:UnregisterAllEvents()
+            self:SetScript("OnUpdate", nil)
+            local t = 0
+            local delay = CreateFrame("Frame")
+            delay:SetScript("OnUpdate", function(d, de)
+                t = t + de
+                if t >= BATCH_DELAY then
+                    d:SetScript("OnUpdate", nil)
+                    SendNextBatch()
+                end
+            end)
         end
-        batch[#batch + 1] = table.remove(sendQueue, 1)
-    end
+    end)
+end
 
-    -- Skip recipients already known blocked this session - go straight to backups
-    if mailBlockedRecipients[recipient] then
-        FailoverBatch(batch, recipient)
-        ContinueAfterDelay(0)
-        return
-    end
+local function ContinueAfterDelay(extraDelay)
+    local f = CreateFrame("Frame")
+    local t = 0
+    local need = (extraDelay or 0) + BATCH_DELAY
+    f:SetScript("OnUpdate", function(self, e)
+        t = t + e
+        if t >= need then
+            self:SetScript("OnUpdate", nil)
+            SendNextBatch()
+        end
+    end)
+end
 
-    sendBatchIndex = sendBatchIndex + 1
-    Print(string.format("Batch %d/%d -> %s (%d item(s))...",
-        sendBatchIndex, sendBatchTotal, recipient, #batch))
-
+local function AttachBatchAndSend(recipient, batch)
     ClearMailAttachments()
 
-    if MailFrameTab_OnClick and MailFrameTab2 then
-        MailFrameTab_OnClick(MailFrameTab2, 2)
-    end
-
-    -- Relocate every item - prior sends compact bag slots
-    local usedSlots = {}
     local attachedEntries = {}
     local deferred = {}
     for _, entry in ipairs(batch) do
-        if RelocateEntry(entry, usedSlots) and AttachItem(entry.bag, entry.slot, #attachedEntries + 1) then
-            attachedEntries[#attachedEntries + 1] = entry
+        local attachIndex = #attachedEntries + 1
+        if RelocateEntry(entry) and AttachItem(entry.bag, entry.slot, attachIndex) then
+            attachedEntries[attachIndex] = entry
         else
-            entry.attachRetries = (entry.attachRetries or 0) + 1
-            if entry.attachRetries <= 2 then
-                deferred[#deferred + 1] = entry
-            else
-                Print("|cffff9900Could not attach item " .. tostring(entry.itemID)
-                    .. " - left in bags.|r")
-            end
+            deferred[#deferred + 1] = entry
         end
     end
 
+    -- Reconcile with what the mail UI actually holds (false-positive attaches)
+    local actual = CountSendMailAttachments()
+    while #attachedEntries > actual do
+        local entry = table.remove(attachedEntries)
+        deferred[#deferred + 1] = entry
+    end
+
+    -- Never drop items - park unattached ones for a later batch
     if #deferred > 0 then
-        PrependQueueGrouped(deferred)
+        AppendQueueGrouped(deferred)
+        Print(string.format("|cffaaaaaaRequeued %d item(s) that did not attach.|r", #deferred))
     end
 
     if #attachedEntries == 0 then
-        Print("|cffff9900Batch had no attachable items - retrying remaining queue.|r")
-        ContinueAfterDelay(BAG_SETTLE_DELAY)
+        emptyBatchStreak = emptyBatchStreak + 1
+        Print(string.format(
+            "|cffff9900Batch had no attachable items (%d/%d empty retries, %d still queued).|r",
+            emptyBatchStreak, MAX_EMPTY_BATCH_STREAK, #sendQueue))
+        if emptyBatchStreak >= MAX_EMPTY_BATCH_STREAK then
+            FinishSending("|cffff0000Send stalled attaching items. Try Send All again once bags settle.|r")
+            return
+        end
+        ContinueAfterDelay(1.0)
         return
     end
 
+    emptyBatchStreak = 0
+
     local postage = GetSendMailPrice and GetSendMailPrice() or 30
     if GetMoney() < postage then
-        sending = false
+        AppendQueueGrouped(attachedEntries)
         ClearMailAttachments()
-        PrependQueueGrouped(attachedEntries)
-        Print("|cffff0000Not enough money for postage. Send cancelled.|r")
-        if panel and panel.stopBtn then
-            panel.stopBtn:Disable()
-        end
-        UpdateSendButton()
+        FinishSending("|cffff0000Not enough money for postage. Send cancelled.|r")
         return
     end
 
@@ -1603,11 +1730,13 @@ SendNextBatch = function()
     if SendMailSubjectEditBox then SendMailSubjectEditBox:SetText(subject) end
     if SendMailBodyEditBox then SendMailBodyEditBox:SetText("") end
     lastMailUIError = nil
+    Print(string.format("Sending %d attachment(s) to %s...", #attachedEntries, recipient))
     SendMail(recipient, subject, "")
 
     local f = CreateFrame("Frame")
     local elapsed = 0
     local waiting = true
+    local failedPending = false
     f:RegisterEvent("MAIL_SEND_SUCCESS")
     f:RegisterEvent("MAIL_FAILED")
     f:RegisterEvent("UI_ERROR_MESSAGE")
@@ -1620,61 +1749,103 @@ SendNextBatch = function()
         end
         if event == "MAIL_SEND_SUCCESS" then
             waiting = false
+            failedPending = false
             self:UnregisterAllEvents()
             self:SetScript("OnEvent", nil)
             self:SetScript("OnUpdate", nil)
-            ContinueAfterDelay(BAG_SETTLE_DELAY)
+            ContinueAfterBagsSettle()
         elseif event == "MAIL_FAILED" then
+            -- Keep SUCCESS armed - some cores fire both; SUCCESS must win
+            failedPending = true
             waiting = false
-            self:UnregisterEvent("MAIL_SEND_SUCCESS")
-            self:UnregisterEvent("MAIL_FAILED")
-            local decideAt = 0
-            self:SetScript("OnUpdate", function(frame, e)
-                decideAt = decideAt + e
-                if decideAt < 0.25 then return end
-                frame:UnregisterAllEvents()
-                frame:SetScript("OnEvent", nil)
-                frame:SetScript("OnUpdate", nil)
-                ClearMailAttachments()
-
-                local err = lastMailUIError
-                if IsRecipientCapError(err) then
-                    FailoverBatch(attachedEntries, recipient)
-                    if #sendQueue == 0 then
-                        sending = false
-                        Print("|cffff0000Send stopped - empty " .. recipient
-                            .. "'s mailbox (or add a route backup), then try again.|r")
-                        if panel and panel.stopBtn then
-                            panel.stopBtn:Disable()
-                        end
-                        UpdateSendButton()
-                        RefreshPreview()
-                    else
-                        ContinueAfterDelay(0)
-                    end
-                else
-                    sending = false
-                    Print("|cffff0000Mail failed"
-                        .. (err and (": " .. err) or "")
-                        .. ". Remaining batches cancelled.|r")
-                    sendQueue = {}
-                    if panel and panel.stopBtn then
-                        panel.stopBtn:Disable()
-                    end
-                    UpdateSendButton()
-                end
-            end)
         end
     end)
     f:SetScript("OnUpdate", function(self, e)
         elapsed = elapsed + e
+        if failedPending and elapsed >= 0.4 then
+            failedPending = false
+            self:UnregisterAllEvents()
+            self:SetScript("OnEvent", nil)
+            self:SetScript("OnUpdate", nil)
+            ClearMailAttachments()
+
+            local err = lastMailUIError
+            if IsRecipientCapError(err) then
+                FailoverBatch(attachedEntries, recipient)
+                if #sendQueue == 0 then
+                    FinishSending("|cffff0000Send stopped - empty " .. recipient
+                        .. "'s mailbox (or add a route backup), then try again.|r")
+                else
+                    ContinueAfterDelay(0)
+                end
+            else
+                sendQueue = {}
+                FinishSending("|cffff0000Mail failed"
+                    .. (err and (": " .. err) or "")
+                    .. ". Remaining batches cancelled.|r")
+            end
+            return
+        end
         if waiting and elapsed >= 8 then
             waiting = false
             self:UnregisterAllEvents()
             self:SetScript("OnEvent", nil)
             self:SetScript("OnUpdate", nil)
             Print("|cffff9900No mail success event - continuing anyway.|r")
-            ContinueAfterDelay(BAG_SETTLE_DELAY)
+            ContinueAfterBagsSettle()
+        end
+    end)
+end
+
+SendNextBatch = function()
+    if stopRequested then
+        sending = false
+        UpdateSendButton()
+        return
+    end
+
+    if not MailboxOpen() then
+        FinishSending("|cffff0000Mailbox closed - send cancelled.|r")
+        return
+    end
+
+    if #sendQueue == 0 then
+        FinishSending("|cff00ff00Done.|r All batches sent.")
+        return
+    end
+
+    local recipient = sendQueue[1].recipient
+    local batch = {}
+    while #batch < MAX_ATTACHMENTS and #sendQueue > 0 do
+        if sendQueue[1].recipient ~= recipient then
+            break
+        end
+        batch[#batch + 1] = table.remove(sendQueue, 1)
+    end
+
+    if mailBlockedRecipients[recipient] then
+        FailoverBatch(batch, recipient)
+        ContinueAfterDelay(0)
+        return
+    end
+
+    sendBatchIndex = sendBatchIndex + 1
+    Print(string.format("Batch %d/%d -> %s (%d item(s), %d queued after)...",
+        sendBatchIndex, sendBatchTotal, recipient, #batch, #sendQueue))
+
+    -- Switch to Send tab, then attach after a short delay so the frame is ready
+    if MailFrameTab_OnClick and MailFrameTab2 then
+        MailFrameTab_OnClick(MailFrameTab2, 2)
+    end
+
+    local f = CreateFrame("Frame")
+    local t = 0
+    f:SetScript("OnUpdate", function(self, e)
+        t = t + e
+        if t >= TAB_SWITCH_DELAY then
+            self:SetScript("OnUpdate", nil)
+            if stopRequested or not sending then return end
+            AttachBatchAndSend(recipient, batch)
         end
     end)
 end
@@ -1688,6 +1859,7 @@ StartSending = function()
 
     mailBlockedRecipients = {}
     lastMailUIError = nil
+    emptyBatchStreak = 0
 
     local byRecip = {}
     local recipOrder = {}
@@ -1712,7 +1884,6 @@ StartSending = function()
                 category = entry.category,
                 mythicTier = entry.mythicTier,
                 triedRecipients = tried,
-                attachRetries = 0,
             }
         end
     end
