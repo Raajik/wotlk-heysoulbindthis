@@ -1,0 +1,6 @@
+## Interface: 30300
+## Title: HeySoulbindThis
+## Notes: Preview and batch-mail class-appropriate weapons and armor to your alts and friends.
+## Author: You
+## SavedVariables: HeySoulbindThisDB
+HeySoulbindThis.lua
