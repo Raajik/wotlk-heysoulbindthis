@@ -1,4 +1,5 @@
 local addonName = "HeySoulbindThis"
+local ADDON_BUILD = "2026-08-09j"
 
 -- =====================================================================
 -- 0. CONFIG / CONSTANTS
@@ -6,9 +7,10 @@ local addonName = "HeySoulbindThis"
 local CHAT_PREFIX = "|cff33ff99[HeySoulbindThis]|r "
 local MAX_ATTACHMENTS = 12
 local BATCH_DELAY = 0.75
-local PANEL_WIDTH = 560
-local PANEL_HEIGHT = 560
-local ROW_HEIGHT = 22
+local PANEL_WIDTH = 520
+local PANEL_HEIGHT = 500
+local ROW_HEIGHT = 18
+local MAIL_DOCK_GAP = 3
 
 local FLAT_BG = {
     bgFile = "Interface\\Buttons\\WHITE8X8",
@@ -151,7 +153,7 @@ local WILDCARD_SLOTS = {
     INVTYPE_TRINKET = true,
 }
 
--- Held-in-off-hand frills — all classes can equip in WotLK
+-- Held-in-off-hand frills - all classes can equip in WotLK
 local OFFHAND_SLOTS = {
     INVTYPE_HOLDABLE = true,
 }
@@ -232,6 +234,7 @@ local NormalizeRouteList
 local GetRouteCandidates
 local MatchWeaponCategory
 local GetMythicTier
+local TogglePanel
 
 -- =====================================================================
 -- 2. HELPERS / STYLE
@@ -331,7 +334,8 @@ local function CreateFlatButton(parent, width, height, text)
     btn:SetBackdrop(FLAT_BG)
     btn:SetBackdropColor(0.16, 0.16, 0.16, 1)
     btn:SetBackdropBorderColor(0.55, 0.55, 0.55, 1)
-    local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    -- Compact mail-tab UI: small font fits default MailFrame width
+    local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     fs:SetPoint("CENTER", 0, 0)
     fs:SetText(text or "")
     btn.text = fs
@@ -380,6 +384,54 @@ local function CreateFlatButton(parent, width, height, text)
         if self.text then self.text:SetText(t) end
     end
     return btn
+end
+
+local function CreateFlatEditBox(parent, width, height)
+    local box = CreateFrame("EditBox", nil, parent)
+    box:SetWidth(width)
+    box:SetHeight(height or 22)
+    box:SetBackdrop(FLAT_BG)
+    box:SetBackdropColor(0.08, 0.08, 0.08, 1)
+    box:SetBackdropBorderColor(0.55, 0.55, 0.55, 1)
+    box:SetFontObject(GameFontHighlightSmall)
+    box:SetTextInsets(4, 4, 0, 0)
+    box:SetAutoFocus(false)
+    box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    box:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+    box:SetScript("OnEditFocusGained", function(self)
+        self:SetBackdropBorderColor(0.85, 0.85, 0.85, 1)
+        self:SetBackdropColor(0.12, 0.12, 0.12, 1)
+    end)
+    box:SetScript("OnEditFocusLost", function(self)
+        self:SetBackdropBorderColor(0.55, 0.55, 0.55, 1)
+        self:SetBackdropColor(0.08, 0.08, 0.08, 1)
+    end)
+    return box
+end
+
+local function CreateFlatCheckButton(parent, size)
+    size = size or 18
+    local cb = CreateFrame("CheckButton", nil, parent)
+    cb:SetWidth(size)
+    cb:SetHeight(size)
+    cb:SetBackdrop(FLAT_BG)
+    cb:SetBackdropColor(0.1, 0.1, 0.1, 1)
+    cb:SetBackdropBorderColor(0.55, 0.55, 0.55, 1)
+
+    local checked = cb:CreateTexture(nil, "ARTWORK")
+    checked:SetPoint("TOPLEFT", 3, -3)
+    checked:SetPoint("BOTTOMRIGHT", -3, 3)
+    checked:SetTexture("Interface\\Buttons\\WHITE8X8")
+    checked:SetVertexColor(0.45, 0.8, 0.45, 1)
+    cb:SetCheckedTexture(checked)
+
+    cb:SetScript("OnEnter", function(self)
+        self:SetBackdropBorderColor(0.8, 0.8, 0.8, 1)
+    end)
+    cb:SetScript("OnLeave", function(self)
+        self:SetBackdropBorderColor(0.55, 0.55, 0.55, 1)
+    end)
+    return cb
 end
 
 -- Shared open flat-dropdown menu (only one at a time)
@@ -968,7 +1020,7 @@ ResolveRecipient = function(routeKey, weaponCategory, relicIndex, reqLevel, cate
         return nil
     end
 
-    -- Wildcard / Offhand — any class, walk backups
+    -- Wildcard / Offhand - any class, walk backups
     if routeKey == "Wildcard" or routeKey == "Offhand" then
         for _, charKey in ipairs(GetRouteCandidates(routeKey)) do
             local key, data = TryCandidate(charKey, nil, assigned, itemID, mythicTier)
@@ -1065,7 +1117,7 @@ ScanBags = function()
     return results
 end
 
-================================================================
+-- =====================================================================
 -- 5. CHARACTER RECORDING
 -- =====================================================================
 local function RecordCurrentCharacter()
@@ -1165,7 +1217,7 @@ SendNextBatch = function()
 
     if not MailboxOpen() then
         sending = false
-        Print("|cffff0000Mailbox closed — send cancelled.|r")
+        Print("|cffff0000Mailbox closed - send cancelled.|r")
         UpdateSendButton()
         return
     end
@@ -1182,7 +1234,7 @@ SendNextBatch = function()
         return
     end
 
-    -- Peek recipient for this batch — keep same recipient until 12 or recipient changes
+    -- Peek recipient for this batch - keep same recipient until 12 or recipient changes
     local recipient = sendQueue[1].recipient
     local batch = {}
     while #batch < MAX_ATTACHMENTS and #sendQueue > 0 do
@@ -1225,7 +1277,7 @@ SendNextBatch = function()
     end
 
     if attached == 0 then
-        Print("|cffff9900Batch had no attachable items — skipping.|r")
+        Print("|cffff9900Batch had no attachable items - skipping.|r")
         ContinueAfterDelay()
         return
     end
@@ -1280,7 +1332,7 @@ SendNextBatch = function()
             self:UnregisterAllEvents()
             self:SetScript("OnEvent", nil)
             self:SetScript("OnUpdate", nil)
-            Print("|cffff9900No mail success event — continuing anyway.|r")
+            Print("|cffff9900No mail success event - continuing anyway.|r")
             SendNextBatch()
         end
     end)
@@ -1390,7 +1442,7 @@ local function FindBestOpenMail()
                     bestIdx = i
                 end
             else
-                -- Empty mail (already looted) — delete these next-priority via score -1
+                -- Empty mail (already looted) - delete these next-priority via score -1
                 if bestScore > -1 then
                     -- Prefer deleting empties before heavy mails only if nothing lootable
                     -- handled below if bestIdx stays nil for lootable
@@ -1401,7 +1453,7 @@ local function FindBestOpenMail()
     if bestIdx then
         return bestIdx, "loot"
     end
-    -- No lootable mail — delete empty non-COD messages
+    -- No lootable mail - delete empty non-COD messages
     for i = 1, num do
         local _, _, _, _, money, CODAmount, _, hasItem = GetInboxHeaderInfo(i)
         money = money or 0
@@ -1421,7 +1473,7 @@ ProcessOpenAll = function()
     end
     if not MailboxOpen() then
         openingMail = false
-        Print("|cffff0000Mailbox closed — open-all cancelled.|r")
+        Print("|cffff0000Mailbox closed - open-all cancelled.|r")
         UpdateSendButton()
         return
     end
@@ -1510,7 +1562,9 @@ UpdateSendButton = function()
         end
     end
     local rc = 0
-    for _ in pairs(recipients) do rc = rc + 1 end
+    for _ in pairs(recipients) do
+        rc = rc + 1
+    end
     panel.sendBtn:SetText(string.format("Send All (%d to %d)", n, rc))
     if sending or openingMail or n == 0 then
         panel.sendBtn:Disable()
@@ -1527,16 +1581,128 @@ UpdateSendButton = function()
 end
 
 local function CreateScrollList(parent, name, width, height)
-    local scroll = CreateFrame("ScrollFrame", name, parent, "UIPanelScrollFrameTemplate")
-    scroll:SetWidth(width)
-    scroll:SetHeight(height)
-    local content = CreateFrame("Frame", name .. "Content", scroll)
-    content:SetWidth(width - 20)
+    local barW = 12
+    local holder = CreateFrame("Frame", name and (name .. "Holder") or nil, parent)
+    if width then holder:SetWidth(width) end
+    if height then holder:SetHeight(height) end
+
+    local track = CreateFrame("Frame", nil, holder)
+    track:SetWidth(barW)
+    track:SetPoint("TOPRIGHT", holder, "TOPRIGHT", 0, 0)
+    track:SetPoint("BOTTOMRIGHT", holder, "BOTTOMRIGHT", 0, 0)
+    track:SetBackdrop(FLAT_BG)
+    track:SetBackdropColor(0.1, 0.1, 0.1, 1)
+    track:SetBackdropBorderColor(0.35, 0.35, 0.35, 1)
+
+    local scroll = CreateFrame("ScrollFrame", name, holder)
+    scroll:SetPoint("TOPLEFT", holder, "TOPLEFT", 0, 0)
+    scroll:SetPoint("BOTTOMLEFT", holder, "BOTTOMLEFT", 0, 0)
+    scroll:SetPoint("RIGHT", track, "LEFT", -2, 0)
+    scroll:SetBackdrop(FLAT_BG)
+    scroll:SetBackdropColor(0.05, 0.05, 0.05, 0.85)
+    scroll:SetBackdropBorderColor(0.35, 0.35, 0.35, 1)
+    scroll:EnableMouseWheel(true)
+
+    local content = CreateFrame("Frame", name and (name .. "Content") or nil, scroll)
+    content:SetWidth(math.max(10, (width or 100) - barW - 8))
     content:SetHeight(1)
     scroll:SetScrollChild(content)
-    scroll.content = content
-    scroll.rows = {}
-    return scroll
+
+    local thumb = CreateFrame("Button", nil, track)
+    thumb:SetWidth(barW - 2)
+    thumb:SetHeight(32)
+    thumb:SetBackdrop(FLAT_BG)
+    thumb:SetBackdropColor(0.35, 0.35, 0.35, 1)
+    thumb:SetBackdropBorderColor(0.55, 0.55, 0.55, 1)
+    thumb:SetPoint("TOP", track, "TOP", 0, -1)
+
+    local function UpdateThumb()
+        local range = scroll:GetVerticalScrollRange() or 0
+        local viewH = scroll:GetHeight() or 1
+        local contentH = content:GetHeight() or 1
+        if range <= 0 or contentH <= viewH + 1 then
+            thumb:Hide()
+            return
+        end
+        thumb:Show()
+        local thumbH = math.max(24, viewH * (viewH / contentH))
+        if thumbH > viewH - 4 then
+            thumbH = viewH - 4
+        end
+        thumb:SetHeight(thumbH)
+        local scrollPos = scroll:GetVerticalScroll() or 0
+        local maxTravel = viewH - thumbH - 2
+        local y = (range > 0 and maxTravel > 0) and ((scrollPos / range) * maxTravel) or 0
+        thumb:ClearAllPoints()
+        thumb:SetPoint("TOP", track, "TOP", 0, -1 - y)
+    end
+
+    local function SyncSize()
+        local w = holder:GetWidth() or width or 100
+        content:SetWidth(math.max(10, w - barW - 8))
+        UpdateThumb()
+    end
+
+    holder:SetScript("OnSizeChanged", function()
+        SyncSize()
+    end)
+
+    scroll:SetScript("OnVerticalScroll", function()
+        UpdateThumb()
+    end)
+    scroll:SetScript("OnMouseWheel", function(self, delta)
+        local cur = self:GetVerticalScroll() or 0
+        local maxs = self:GetVerticalScrollRange() or 0
+        local new = cur - (delta * 28)
+        if new < 0 then new = 0 end
+        if new > maxs then new = maxs end
+        self:SetVerticalScroll(new)
+        UpdateThumb()
+    end)
+
+    thumb:EnableMouse(true)
+    thumb:RegisterForDrag("LeftButton")
+    thumb:SetScript("OnDragStart", function(self)
+        self.dragging = true
+    end)
+    thumb:SetScript("OnDragStop", function(self)
+        self.dragging = false
+    end)
+    thumb:SetScript("OnUpdate", function(self)
+        if not self.dragging then return end
+        local scale = track:GetEffectiveScale() or 1
+        local _, cursorY = GetCursorPosition()
+        cursorY = cursorY / scale
+        local top = track:GetTop() or 0
+        local thumbH = self:GetHeight() or 32
+        local viewH = track:GetHeight() or 1
+        local maxTravel = viewH - thumbH - 2
+        if maxTravel < 1 then return end
+        local y = top - cursorY - (thumbH / 2)
+        if y < 0 then y = 0 end
+        if y > maxTravel then y = maxTravel end
+        local range = scroll:GetVerticalScrollRange() or 0
+        scroll:SetVerticalScroll((y / maxTravel) * range)
+        UpdateThumb()
+    end)
+
+    local sync = CreateFrame("Frame", nil, holder)
+    sync:SetScript("OnUpdate", function()
+        if not holder:IsVisible() then return end
+        local range = scroll:GetVerticalScrollRange() or 0
+        local h = content:GetHeight() or 0
+        if range ~= holder._lastRange or h ~= holder._lastH then
+            holder._lastRange = range
+            holder._lastH = h
+            UpdateThumb()
+        end
+    end)
+
+    holder.UpdateThumb = UpdateThumb
+    holder.scroll = scroll
+    holder.content = content
+    holder.rows = {}
+    return holder
 end
 
 local function ClearRows(scroll)
@@ -1608,12 +1774,12 @@ RefreshRoutes = function()
         bg:SetVertexColor(0.18, 0.18, 0.22)
         bg:SetAlpha(0.8)
 
-        local title = header:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        title:SetPoint("LEFT", header, "LEFT", 6, 0)
+        local title = header:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        title:SetPoint("LEFT", header, "LEFT", 4, 0)
         title:SetText(routeKey)
 
-        local addBtn = CreateFlatButton(header, 22, 18, "+")
-        addBtn:SetPoint("RIGHT", header, "RIGHT", -4, 0)
+        local addBtn = CreateFlatButton(header, 16, 14, "+")
+        addBtn:SetPoint("RIGHT", header, "RIGHT", -2, 0)
         addBtn:SetScript("OnClick", function()
             local list = NormalizeRouteList(routeKey)
             if #list >= MAX_ROUTE_SLOTS then
@@ -1649,21 +1815,22 @@ RefreshRoutes = function()
 
         for slotIndex, charKey in ipairs(list) do
             local row = CreateFrame("Frame", nil, content)
-            row:SetHeight(26)
+            row:SetHeight(20)
             row:SetWidth(content:GetWidth())
             row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
 
             local slotFS = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            slotFS:SetPoint("LEFT", row, "LEFT", 12, 0)
-            slotFS:SetWidth(36)
+            slotFS:SetPoint("LEFT", row, "LEFT", 8, 0)
+            slotFS:SetWidth(28)
             slotFS:SetText(SLOT_LABELS[slotIndex] or tostring(slotIndex))
 
-            local dd = CreateFlatDropdown(row, 160, 22)
-            dd:SetPoint("LEFT", slotFS, "RIGHT", 4, 0)
+            local ddW = math.max(80, (content:GetWidth() or 140) - 56)
+            local dd = CreateFlatDropdown(row, ddW, 16)
+            dd:SetPoint("LEFT", slotFS, "RIGHT", 2, 0)
             InitSlotDropdown(dd, routeKey, slotIndex)
 
-            local rm = CreateFlatButton(row, 22, 18, "-")
-            rm:SetPoint("LEFT", dd, "RIGHT", 6, 0)
+            local rm = CreateFlatButton(row, 16, 16, "-")
+            rm:SetPoint("LEFT", dd, "RIGHT", 2, 0)
             rm:SetScript("OnClick", function()
                 local list = NormalizeRouteList(routeKey)
                 table.remove(list, slotIndex)
@@ -1673,10 +1840,10 @@ RefreshRoutes = function()
             end)
 
             panel.routeScroll.rows[#panel.routeScroll.rows + 1] = row
-            y = y + 28
+            y = y + 22
         end
 
-        y = y + 4
+        y = y + 2
     end
 
     content:SetHeight(math.max(1, y))
@@ -1684,19 +1851,20 @@ RefreshRoutes = function()
     if panel.priorityScroll then
         ClearRows(panel.priorityScroll)
         local pcontent = panel.priorityScroll.content
+        if panel.priorityScroll.UpdateThumb then
+            panel.priorityScroll.UpdateThumb()
+        end
         local py = 0
+        local rowW = pcontent:GetWidth() or 160
         for i, routeKey in ipairs(HeySoulbindThisDB.priority) do
             local row = CreateFrame("Frame", nil, pcontent)
-            row:SetHeight(ROW_HEIGHT + 2)
-            row:SetWidth(pcontent:GetWidth())
+            row:SetHeight(ROW_HEIGHT)
+            row:SetWidth(rowW)
             row:SetPoint("TOPLEFT", pcontent, "TOPLEFT", 0, -py)
 
-            local fs = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            fs:SetPoint("LEFT", row, "LEFT", 4, 0)
-            fs:SetText(string.format("%d. %s", i, routeKey))
-
-            local up = CreateFlatButton(row, 28, 18, "^")
-            up:SetPoint("RIGHT", row, "RIGHT", -36, 0)
+            -- Keep ^/v on the left so they are never clipped under the scrollbar
+            local up = CreateFlatButton(row, 16, 14, "^")
+            up:SetPoint("LEFT", row, "LEFT", 2, 0)
             up:SetScript("OnClick", function()
                 if i > 1 then
                     HeySoulbindThisDB.priority[i], HeySoulbindThisDB.priority[i - 1] =
@@ -1706,8 +1874,8 @@ RefreshRoutes = function()
                 end
             end)
 
-            local down = CreateFlatButton(row, 28, 18, "v")
-            down:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+            local down = CreateFlatButton(row, 16, 14, "v")
+            down:SetPoint("LEFT", up, "RIGHT", 2, 0)
             down:SetScript("OnClick", function()
                 if i < #HeySoulbindThisDB.priority then
                     HeySoulbindThisDB.priority[i], HeySoulbindThisDB.priority[i + 1] =
@@ -1717,8 +1885,15 @@ RefreshRoutes = function()
                 end
             end)
 
+            local fs = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            fs:SetPoint("LEFT", down, "RIGHT", 4, 0)
+            fs:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+            fs:SetJustifyH("LEFT")
+            fs:SetWordWrap(false)
+            fs:SetText(string.format("%d. %s", i, routeKey))
+
             panel.priorityScroll.rows[#panel.priorityScroll.rows + 1] = row
-            py = py + ROW_HEIGHT + 2
+            py = py + ROW_HEIGHT
         end
         pcontent:SetHeight(math.max(1, py))
     end
@@ -1825,10 +2000,8 @@ LayoutPreview = function()
 
                 local sectionCat = entry.category
                 local sectionRecip = entry.recipName
-                local hdrCB = CreateFrame("CheckButton", nil, header, "UICheckButtonTemplate")
-                hdrCB:SetWidth(24)
-                hdrCB:SetHeight(24)
-                hdrCB:SetPoint("RIGHT", header, "RIGHT", -4, 0)
+                local hdrCB = CreateFlatCheckButton(header, 14)
+                hdrCB:SetPoint("RIGHT", header, "RIGHT", -2, 0)
                 local allChecked = true
                 for _, e in ipairs(previewItems) do
                     if e.category == sectionCat and e.recipName == sectionRecip and not e.checked then
@@ -1863,10 +2036,8 @@ LayoutPreview = function()
             row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
             row.entry = entry
 
-            local cb = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
-            cb:SetWidth(24)
-            cb:SetHeight(24)
-            cb:SetPoint("LEFT", row, "LEFT", 8, 0)
+            local cb = CreateFlatCheckButton(row, 14)
+            cb:SetPoint("LEFT", row, "LEFT", 4, 0)
             cb:SetChecked(entry.checked)
             cb:SetScript("OnClick", function(self)
                 entry.checked = self:GetChecked() and true or false
@@ -1874,14 +2045,19 @@ LayoutPreview = function()
             end)
             row.itemCB = cb
 
+            local blBtn = CreateFlatButton(row, 52, 14, "Blacklist")
+            blBtn:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+
+            local linkW = math.max(80, (content:GetWidth() or 200) - 76)
             local linkBtn = CreateFrame("Button", nil, row)
             linkBtn:SetHeight(ROW_HEIGHT)
-            linkBtn:SetWidth(320)
+            linkBtn:SetWidth(linkW)
             linkBtn:SetPoint("LEFT", cb, "RIGHT", 2, 0)
-            local linkFS = linkBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            linkBtn:SetPoint("RIGHT", blBtn, "LEFT", -4, 0)
+            local linkFS = linkBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
             linkFS:SetPoint("LEFT", linkBtn, "LEFT", 0, 0)
+            linkFS:SetPoint("RIGHT", linkBtn, "RIGHT", 0, 0)
             linkFS:SetJustifyH("LEFT")
-            linkFS:SetWidth(320)
             linkFS:SetWordWrap(false)
             linkFS:SetText(entry.link)
             linkBtn:SetFontString(linkFS)
@@ -1900,8 +2076,6 @@ LayoutPreview = function()
                 end
             end)
 
-            local blBtn = CreateFlatButton(row, 70, 18, "Blacklist")
-            blBtn:SetPoint("RIGHT", row, "RIGHT", -4, 0)
             blBtn:SetScript("OnClick", function()
                 EnsureDB()
                 HeySoulbindThisDB.blacklist[entry.itemID] = true
@@ -1931,7 +2105,7 @@ RefreshCharacterList = function()
     local content = panel.charScroll.content
     local y = 0
     local me = CurrentPlayerKey()
-    local rowH = 28
+    local rowH = 20
 
     local keys = {}
     for key in pairs(HeySoulbindThisDB.characters) do
@@ -1947,15 +2121,37 @@ RefreshCharacterList = function()
             row:SetWidth(content:GetWidth())
             row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
 
-            local label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            local rm = CreateFlatButton(row, 48, 16, "Remove")
+            rm:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+            rm:SetScript("OnClick", function()
+                HeySoulbindThisDB.characters[key] = nil
+                for routeKey, rk in pairs(HeySoulbindThisDB.routes) do
+                    if type(rk) == "string" and rk == key then
+                        HeySoulbindThisDB.routes[routeKey] = {}
+                    elseif type(rk) == "table" then
+                        local keep = {}
+                        for _, ck in ipairs(rk) do
+                            if ck ~= key then keep[#keep + 1] = ck end
+                        end
+                        HeySoulbindThisDB.routes[routeKey] = keep
+                    end
+                end
+                AutoFillRoutes()
+                RefreshCharacterList()
+                RefreshRoutes()
+                RefreshPreview()
+            end)
+
+            local classDD = CreateFlatDropdown(row, 96, 16)
+            classDD:SetPoint("RIGHT", rm, "LEFT", -4, 0)
+
+            local label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
             label:SetPoint("LEFT", row, "LEFT", 4, 0)
-            label:SetWidth(160)
+            label:SetPoint("RIGHT", classDD, "LEFT", -4, 0)
             label:SetJustifyH("LEFT")
             local suffix = (key == me) and " (you)" or (data.isManual and " (manual)" or "")
             label:SetText(ColorClassName(data.name, data.classFile) .. suffix)
 
-            local classDD = CreateFlatDropdown(row, 130, 22)
-            classDD:SetPoint("LEFT", label, "RIGHT", 8, 0)
             classDD:SetLabel(CLASS_DISPLAY[data.classFile] or data.classFile or "?")
             classDD:SetBuildOptions(function()
                 local opts = {}
@@ -1978,29 +2174,8 @@ RefreshCharacterList = function()
                 RefreshPreview()
             end)
 
-            local rm = CreateFlatButton(row, 60, 20, "Remove")
-            rm:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-            rm:SetScript("OnClick", function()
-                HeySoulbindThisDB.characters[key] = nil
-                for routeKey, rk in pairs(HeySoulbindThisDB.routes) do
-                    if type(rk) == "string" and rk == key then
-                        HeySoulbindThisDB.routes[routeKey] = {}
-                    elseif type(rk) == "table" then
-                        local keep = {}
-                        for _, ck in ipairs(rk) do
-                            if ck ~= key then keep[#keep + 1] = ck end
-                        end
-                        HeySoulbindThisDB.routes[routeKey] = keep
-                    end
-                end
-                AutoFillRoutes()
-                RefreshCharacterList()
-                RefreshRoutes()
-                RefreshPreview()
-            end)
-
             panel.charScroll.rows[#panel.charScroll.rows + 1] = row
-            y = y + rowH + 2
+            y = y + rowH
         end
     end
     content:SetHeight(math.max(1, y))
@@ -2026,14 +2201,15 @@ RefreshBlacklist = function()
         row:SetWidth(content:GetWidth())
         row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
 
-        local fs = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        local rm = CreateFlatButton(row, 48, 14, "Remove")
+        rm:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+
+        local fs = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         fs:SetPoint("LEFT", row, "LEFT", 4, 0)
-        fs:SetWidth(360)
+        fs:SetPoint("RIGHT", rm, "LEFT", -4, 0)
         fs:SetJustifyH("LEFT")
         fs:SetText(link or ("item:" .. tostring(id)))
 
-        local rm = CreateFlatButton(row, 60, 18, "Remove")
-        rm:SetPoint("RIGHT", row, "RIGHT", -4, 0)
         rm:SetScript("OnClick", function()
             HeySoulbindThisDB.blacklist[id] = nil
             RefreshBlacklist()
@@ -2075,7 +2251,6 @@ BuildPanel = function()
     panel = CreateFrame("Frame", "HeySoulbindThisFrame", UIParent)
     panel:SetWidth(PANEL_WIDTH)
     panel:SetHeight(PANEL_HEIGHT)
-    panel:SetPoint("CENTER", UIParent, "CENTER", 200, 40)
     panel:SetBackdrop(FLAT_BG)
     panel:SetBackdropColor(0.08, 0.08, 0.08, 0.96)
     panel:SetBackdropBorderColor(0.5, 0.5, 0.5, 1)
@@ -2086,133 +2261,135 @@ BuildPanel = function()
     panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
     panel:SetFrameStrata("HIGH")
     panel:Hide()
-    tinsert(UISpecialFrames, "HeySoulbindThisFrame")
 
     local title = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOP", panel, "TOP", 0, -10)
+    title:SetPoint("TOP", panel, "TOP", 0, -8)
     title:SetText("HeySoulbindThis")
 
-    local close = CreateFlatButton(panel, 22, 22, "X")
+    local close = CreateFlatButton(panel, 18, 18, "X")
     close:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -6, -6)
     close:SetScript("OnClick", function() panel:Hide() end)
 
     local function MakeTab(text, x)
-        local t = CreateFlatButton(panel, 90, 22, text)
-        t:SetPoint("TOPLEFT", panel, "TOPLEFT", x, -36)
+        local t = CreateFlatButton(panel, 86, 18, text)
+        t:SetPoint("TOPLEFT", panel, "TOPLEFT", x, -30)
         return t
     end
-    local tab1 = MakeTab("Send", 12)
+    local tab1 = MakeTab("Send", 8)
     tab1:SetScript("OnClick", function() ShowTab(1) end)
-    local tab2 = MakeTab("Routes", 106)
-    tab2:SetWidth(80)
+    local tab2 = MakeTab("Routes", 98)
+    tab2:SetWidth(70)
     tab2:SetScript("OnClick", function() ShowTab(2) end)
-    local tab3 = MakeTab("Characters", 190)
-    tab3:SetWidth(100)
+    local tab3 = MakeTab("Characters", 172)
+    tab3:SetWidth(84)
     tab3:SetScript("OnClick", function() ShowTab(3) end)
-    local tab4 = MakeTab("Blacklist", 294)
-    tab4:SetWidth(90)
+    local tab4 = MakeTab("Blacklist", 260)
+    tab4:SetWidth(78)
     tab4:SetScript("OnClick", function() ShowTab(4) end)
 
     -- ===== Send tab =====
     local tabMail = CreateFrame("Frame", nil, panel)
-    tabMail:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -64)
-    tabMail:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -12, 12)
+    tabMail:SetPoint("TOPLEFT", panel, "TOPLEFT", 8, -54)
+    tabMail:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -8, 8)
     panel.tabMail = tabMail
 
     panel.previewStatus = tabMail:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    panel.previewStatus:SetPoint("TOPLEFT", tabMail, "TOPLEFT", 4, -4)
+    panel.previewStatus:SetPoint("TOPLEFT", tabMail, "TOPLEFT", 2, -2)
     panel.previewStatus:SetText("Configure Routes, then refresh")
 
-    local refreshBtn = CreateFlatButton(tabMail, 70, 20, "Refresh")
-    refreshBtn:SetPoint("TOPRIGHT", tabMail, "TOPRIGHT", -4, -2)
+    local refreshBtn = CreateFlatButton(tabMail, 60, 16, "Refresh")
+    refreshBtn:SetPoint("TOPRIGHT", tabMail, "TOPRIGHT", 0, 0)
     refreshBtn:SetScript("OnClick", function()
         RefreshPreview()
     end)
 
-    local headerLink = tabMail:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    headerLink:SetPoint("TOPLEFT", tabMail, "TOPLEFT", 32, -28)
-    headerLink:SetText("Items grouped by recipient / type")
+    local headerLink = tabMail:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    headerLink:SetPoint("TOPLEFT", tabMail, "TOPLEFT", 2, -18)
+    headerLink:SetText("Grouped by recipient / type")
 
-    panel.previewScroll = CreateScrollList(tabMail, "HeySoulbindThisPreviewScroll", 510, 360)
-    panel.previewScroll:SetPoint("TOPLEFT", tabMail, "TOPLEFT", 4, -44)
+    local btnRow = CreateFrame("Frame", nil, tabMail)
+    btnRow:SetHeight(20)
+    btnRow:SetPoint("BOTTOMLEFT", tabMail, "BOTTOMLEFT", 0, 0)
+    btnRow:SetPoint("BOTTOMRIGHT", tabMail, "BOTTOMRIGHT", 0, 0)
 
-    panel.sendBtn = CreateFlatButton(tabMail, 150, 24, "Send All (0 to 0)")
-    panel.sendBtn:SetPoint("BOTTOMLEFT", tabMail, "BOTTOMLEFT", 4, 4)
+    panel.sendBtn = CreateFlatButton(btnRow, 130, 18, "Send All (0 to 0)")
+    panel.sendBtn:SetPoint("LEFT", btnRow, "LEFT", 0, 0)
     panel.sendBtn:SetScript("OnClick", StartSending)
     panel.sendBtn:Disable()
 
-    panel.openAllBtn = CreateFlatButton(tabMail, 90, 24, "Open All")
-    panel.openAllBtn:SetPoint("LEFT", panel.sendBtn, "RIGHT", 6, 0)
+    panel.openAllBtn = CreateFlatButton(btnRow, 70, 18, "Open All")
+    panel.openAllBtn:SetPoint("LEFT", panel.sendBtn, "RIGHT", 4, 0)
     panel.openAllBtn:SetScript("OnClick", StartOpenAll)
 
-    panel.stopBtn = CreateFlatButton(tabMail, 60, 24, "Stop")
-    panel.stopBtn:SetPoint("LEFT", panel.openAllBtn, "RIGHT", 6, 0)
+    panel.stopBtn = CreateFlatButton(btnRow, 48, 18, "Stop")
+    panel.stopBtn:SetPoint("LEFT", panel.openAllBtn, "RIGHT", 4, 0)
     panel.stopBtn:Disable()
     panel.stopBtn:SetScript("OnClick", StopSending)
 
-    local mailHint = tabMail:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    mailHint:SetPoint("BOTTOMRIGHT", tabMail, "BOTTOMRIGHT", -4, 8)
-    mailHint:SetText("Mailbox must be open")
+    panel.previewScroll = CreateScrollList(tabMail, "HeySoulbindThisPreviewScroll", 200, 200)
+    panel.previewScroll:SetPoint("TOPLEFT", tabMail, "TOPLEFT", 0, -34)
+    panel.previewScroll:SetPoint("BOTTOMRIGHT", tabMail, "BOTTOMRIGHT", 0, 24)
 
     -- ===== Routes tab =====
     local tabRoutes = CreateFrame("Frame", nil, panel)
-    tabRoutes:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -64)
-    tabRoutes:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -12, 12)
+    tabRoutes:SetPoint("TOPLEFT", panel, "TOPLEFT", 8, -54)
+    tabRoutes:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -8, 8)
     tabRoutes:Hide()
     panel.tabRoutes = tabRoutes
 
-    local routeHelp = tabRoutes:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    routeHelp:SetPoint("TOPLEFT", tabRoutes, "TOPLEFT", 4, -2)
-    routeHelp:SetWidth(520)
+    local routeHelp = tabRoutes:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    routeHelp:SetPoint("TOPLEFT", tabRoutes, "TOPLEFT", 2, -1)
+    routeHelp:SetPoint("TOPRIGHT", tabRoutes, "TOPRIGHT", -2, -1)
     routeHelp:SetJustifyH("LEFT")
-    routeHelp:SetText("Primary + backups per category (+/-). Duplicates of the same item at the same mythic tier go to the next backup.")
+    routeHelp:SetText("Primary + backups (+/-). Same mythic item rolls to next backup.")
 
-    panel.routeScroll = CreateScrollList(tabRoutes, "HeySoulbindThisRouteScroll", 280, 420)
-    panel.routeScroll:SetPoint("TOPLEFT", tabRoutes, "TOPLEFT", 4, -36)
+    -- Left: routes. Right: fixed-width priority column (avoids overlap / clipped controls)
+    local PRI_WIDTH = 190
+    panel.routeScroll = CreateScrollList(tabRoutes, "HeySoulbindThisRouteScroll", 280, 200)
+    panel.routeScroll:SetPoint("TOPLEFT", tabRoutes, "TOPLEFT", 0, -18)
+    panel.routeScroll:SetPoint("BOTTOMLEFT", tabRoutes, "BOTTOMLEFT", 0, 0)
+    panel.routeScroll:SetPoint("RIGHT", tabRoutes, "RIGHT", -(PRI_WIDTH + 8), 0)
 
-    local priLabel = tabRoutes:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    priLabel:SetPoint("TOPLEFT", tabRoutes, "TOPLEFT", 300, -36)
-    priLabel:SetText("Mailing priority")
+    local priLabel = tabRoutes:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    priLabel:SetPoint("TOPRIGHT", tabRoutes, "TOPRIGHT", 0, -18)
+    priLabel:SetWidth(PRI_WIDTH)
+    priLabel:SetJustifyH("LEFT")
+    priLabel:SetText("Priority")
 
-    local priHelp = tabRoutes:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    priHelp:SetPoint("TOPLEFT", priLabel, "BOTTOMLEFT", 0, -2)
-    priHelp:SetWidth(220)
-    priHelp:SetJustifyH("LEFT")
-    priHelp:SetText("Weapons / relics pick the first matching assignee in this order (includes backups).")
-
-    panel.priorityScroll = CreateScrollList(tabRoutes, "HeySoulbindThisPriScroll", 230, 360)
-    panel.priorityScroll:SetPoint("TOPLEFT", tabRoutes, "TOPLEFT", 300, -70)
+    panel.priorityScroll = CreateScrollList(tabRoutes, "HeySoulbindThisPriScroll", PRI_WIDTH, 200)
+    panel.priorityScroll:SetPoint("TOPRIGHT", tabRoutes, "TOPRIGHT", 0, -34)
+    panel.priorityScroll:SetPoint("BOTTOMRIGHT", tabRoutes, "BOTTOMRIGHT", 0, 0)
+    panel.priorityScroll:SetWidth(PRI_WIDTH)
 
     -- ===== Characters tab =====
     local tabChars = CreateFrame("Frame", nil, panel)
-    tabChars:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -64)
-    tabChars:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -12, 12)
+    tabChars:SetPoint("TOPLEFT", panel, "TOPLEFT", 8, -54)
+    tabChars:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -8, 8)
     tabChars:Hide()
     panel.tabChars = tabChars
 
-    local charHelp = tabChars:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    charHelp:SetPoint("TOPLEFT", tabChars, "TOPLEFT", 4, -4)
-    charHelp:SetWidth(500)
+    local charHelp = tabChars:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    charHelp:SetPoint("TOPLEFT", tabChars, "TOPLEFT", 2, -1)
+    charHelp:SetPoint("TOPRIGHT", tabChars, "TOPRIGHT", -2, -1)
     charHelp:SetJustifyH("LEFT")
-    charHelp:SetText("Characters are recorded on login. Add friends below for gift mailing.")
+    charHelp:SetText("Recorded on login. Add friends below for gifts.")
 
-    panel.charScroll = CreateScrollList(tabChars, "HeySoulbindThisCharScroll", 510, 340)
-    panel.charScroll:SetPoint("TOPLEFT", tabChars, "TOPLEFT", 4, -28)
+    local addRow = CreateFrame("Frame", nil, tabChars)
+    addRow:SetHeight(20)
+    addRow:SetPoint("BOTTOMLEFT", tabChars, "BOTTOMLEFT", 0, 0)
+    addRow:SetPoint("BOTTOMRIGHT", tabChars, "BOTTOMRIGHT", 0, 0)
 
-    local addLabel = tabChars:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    addLabel:SetPoint("BOTTOMLEFT", tabChars, "BOTTOMLEFT", 4, 36)
+    local addLabel = addRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    addLabel:SetPoint("LEFT", addRow, "LEFT", 2, 0)
     addLabel:SetText("Add:")
 
-    local nameEdit = CreateFrame("EditBox", "HeySoulbindThisAddName", tabChars, "InputBoxTemplate")
-    nameEdit:SetWidth(120)
-    nameEdit:SetHeight(20)
-    nameEdit:SetPoint("LEFT", addLabel, "RIGHT", 8, 0)
-    nameEdit:SetAutoFocus(false)
+    local nameEdit = CreateFlatEditBox(addRow, 100, 16)
+    nameEdit:SetPoint("LEFT", addLabel, "RIGHT", 4, 0)
     nameEdit:SetMaxLetters(40)
 
     local addClassFile = "WARRIOR"
-    local addClassDD = CreateFlatDropdown(tabChars, 120, 22)
-    addClassDD:SetPoint("LEFT", nameEdit, "RIGHT", 8, 0)
+    local addClassDD = CreateFlatDropdown(addRow, 100, 16)
+    addClassDD:SetPoint("LEFT", nameEdit, "RIGHT", 4, 0)
     addClassDD:SetLabel(CLASS_DISPLAY[addClassFile])
     addClassDD:SetBuildOptions(function()
         local opts = {}
@@ -2226,8 +2403,8 @@ BuildPanel = function()
         addClassDD:SetLabel(CLASS_DISPLAY[value])
     end)
 
-    local addBtn = CreateFlatButton(tabChars, 60, 22, "Add")
-    addBtn:SetPoint("LEFT", addClassDD, "RIGHT", 8, 0)
+    local addBtn = CreateFlatButton(addRow, 44, 16, "Add")
+    addBtn:SetPoint("LEFT", addClassDD, "RIGHT", 4, 0)
     addBtn:SetScript("OnClick", function()
         local name = strtrim(nameEdit:GetText() or "")
         if name == "" then
@@ -2253,62 +2430,109 @@ BuildPanel = function()
         RefreshPreview()
     end)
 
+    panel.charScroll = CreateScrollList(tabChars, "HeySoulbindThisCharScroll", 200, 200)
+    panel.charScroll:SetPoint("TOPLEFT", tabChars, "TOPLEFT", 0, -18)
+    panel.charScroll:SetPoint("BOTTOMRIGHT", tabChars, "BOTTOMRIGHT", 0, 24)
+
     -- ===== Blacklist tab =====
     local tabBL = CreateFrame("Frame", nil, panel)
-    tabBL:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -64)
-    tabBL:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -12, 12)
+    tabBL:SetPoint("TOPLEFT", panel, "TOPLEFT", 8, -54)
+    tabBL:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -8, 8)
     tabBL:Hide()
     panel.tabBlacklist = tabBL
 
-    local blHelp = tabBL:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    blHelp:SetPoint("TOPLEFT", tabBL, "TOPLEFT", 4, -4)
+    local blHelp = tabBL:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    blHelp:SetPoint("TOPLEFT", tabBL, "TOPLEFT", 2, -1)
     blHelp:SetText("Blacklisted items are never offered for mailing.")
 
-    panel.blScroll = CreateScrollList(tabBL, "HeySoulbindThisBLScroll", 510, 420)
-    panel.blScroll:SetPoint("TOPLEFT", tabBL, "TOPLEFT", 4, -28)
+    panel.blScroll = CreateScrollList(tabBL, "HeySoulbindThisBLScroll", 200, 200)
+    panel.blScroll:SetPoint("TOPLEFT", tabBL, "TOPLEFT", 0, -18)
+    panel.blScroll:SetPoint("BOTTOMRIGHT", tabBL, "BOTTOMRIGHT", 0, 0)
 
     return panel
 end
 
+-- =====================================================================
+-- 8. DOCK TO MAILBOX
+-- =====================================================================
+local function MailAnchorFrame()
+    -- Prefer ElvUI's visible backdrop so the gap is against what you actually see
+    if MailFrame and MailFrame.backdrop and MailFrame.backdrop.IsShown
+        and MailFrame.backdrop:IsShown() then
+        return MailFrame.backdrop
+    end
+    return MailFrame
+end
+
 local function AnchorToMailbox()
     if not panel then return end
+    panel:SetParent(UIParent)
     panel:ClearAllPoints()
-    if MailFrame and MailFrame:IsShown() then
-        panel:SetParent(MailFrame)
-        panel:SetPoint("TOPLEFT", MailFrame, "TOPRIGHT", -8, -12)
-        panel:SetFrameStrata(MailFrame:GetFrameStrata())
-        panel:SetFrameLevel((MailFrame:GetFrameLevel() or 0) + 10)
+    local anchor = MailAnchorFrame()
+    if anchor and anchor:IsVisible() then
+        panel:SetPoint("TOPLEFT", anchor, "TOPRIGHT", MAIL_DOCK_GAP, 0)
+        panel:SetFrameStrata(MailFrame and MailFrame:GetFrameStrata() or "HIGH")
+        panel:SetFrameLevel(((MailFrame and MailFrame:GetFrameLevel()) or 0) + 20)
     else
-        panel:SetParent(UIParent)
-        panel:SetPoint("CENTER", UIParent, "CENTER", 200, 40)
+        panel:SetPoint("RIGHT", UIParent, "RIGHT", -40, 0)
         panel:SetFrameStrata("HIGH")
     end
 end
 
-local function TogglePanel()
+local function SafeOpenPanel()
+    BuildPanel()
+    EnsureDB()
+    BuildSubclassCaches()
+    local ok, err = pcall(function()
+        AnchorToMailbox()
+        panel:Show()
+        ShowTab(1)
+    end)
+    if not ok then
+        Print("|cffff0000Panel error:|r " .. tostring(err))
+        if panel then panel:Hide() end
+    end
+end
+
+TogglePanel = function()
     BuildPanel()
     if panel:IsShown() then
         panel:Hide()
     else
-        EnsureDB()
-        BuildSubclassCaches()
-        ShowTab(1)
-        AnchorToMailbox()
-        panel:Show()
+        SafeOpenPanel()
     end
 end
 
 local function ShowPanel()
-    BuildPanel()
-    EnsureDB()
-    BuildSubclassCaches()
-    ShowTab(1)
-    AnchorToMailbox()
-    panel:Show()
+    local f = CreateFrame("Frame")
+    local elapsed = 0
+    f:SetScript("OnUpdate", function(self, e)
+        elapsed = elapsed + e
+        if elapsed < 0.1 then return end
+        self:SetScript("OnUpdate", nil)
+        if not (MailFrame and MailFrame:IsVisible()) then
+            return
+        end
+        SafeOpenPanel()
+    end)
+end
+
+-- Hide leftover Soulbind mail-tab from older builds, if present this session
+local function CleanupLegacyMailTab()
+    if MailFrameTab3 and MailFrameTab3.Hide then
+        MailFrameTab3:Hide()
+        MailFrameTab3:SetParent(nil)
+    end
+    if MailFrame and MailFrame.numTabs and MailFrame.numTabs > 2 then
+        MailFrame.numTabs = 2
+    end
+    if HeySoulbindThisInboxBar and HeySoulbindThisInboxBar.Hide then
+        HeySoulbindThisInboxBar:Hide()
+    end
 end
 
 -- =====================================================================
--- 8. EVENTS / SLASH
+-- 9. EVENTS / SLASH
 -- =====================================================================
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("ADDON_LOADED")
@@ -2324,7 +2548,10 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         BuildSubclassCaches()
         RecordCurrentCharacter()
         AutoFillRoutes()
+        CleanupLegacyMailTab()
+        Print("Loaded " .. ADDON_BUILD .. " - open mailbox or /hst")
     elseif event == "MAIL_SHOW" then
+        CleanupLegacyMailTab()
         ShowPanel()
     elseif event == "MAIL_CLOSED" then
         if sending or openingMail then
@@ -2349,10 +2576,8 @@ SlashCmdList["HeySoulbindThis"] = function(msg)
             TogglePanel()
         end
     elseif msg == "stop" then
-        if sending then StopSending() end
+        if sending or openingMail then StopSending() end
     else
         TogglePanel()
     end
 end
-
-Print("Loaded. /hst — set Routes, open mailbox, Send All.")
