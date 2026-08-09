@@ -1,12 +1,13 @@
 local addonName = "HeySoulbindThis"
-local ADDON_BUILD = "2026-08-09j"
+local ADDON_BUILD = "2026-08-09m"
 
 -- =====================================================================
 -- 0. CONFIG / CONSTANTS
 -- =====================================================================
 local CHAT_PREFIX = "|cff33ff99[HeySoulbindThis]|r "
 local MAX_ATTACHMENTS = 12
-local BATCH_DELAY = 0.75
+local BATCH_DELAY = 1.0
+local BAG_SETTLE_DELAY = 0.35
 local PANEL_WIDTH = 520
 local PANEL_HEIGHT = 500
 local ROW_HEIGHT = 18
@@ -201,6 +202,9 @@ local sendQueue = {}
 local sendRecipient
 local sendBatchIndex = 0
 local sendBatchTotal = 0
+-- Names that hit "unique mail recipients" / full inbox this send session
+local mailBlockedRecipients = {}
+local lastMailUIError
 local scanTip
 local OPEN_DELAY = 0.35
 local MAX_INBOX_ATTACH = ATTACHMENTS_MAX_RECEIVE or 16
@@ -323,8 +327,68 @@ end
 local function GetScanTooltip()
     if scanTip then return scanTip end
     scanTip = CreateFrame("GameTooltip", "HeySoulbindThisScanTooltip", nil, "GameTooltipTemplate")
-    scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
     return scanTip
+end
+
+-- Strip tooltip markup the same way Soulbind does (color codes, textures, links).
+local function CleanTooltipText(s)
+    if not s then return "" end
+    s = string.gsub(s, "|c%x%x%x%x%x%x%x%x", "")
+    s = string.gsub(s, "|C%x%x%x%x%x%x%x%x", "")
+    s = string.gsub(s, "|r", "")
+    s = string.gsub(s, "|R", "")
+    s = string.gsub(s, "|T.-|t", "")
+    s = string.gsub(s, "|H.-|h(.-)|h", "%1")
+    s = string.gsub(s, "|n", " ")
+    return s
+end
+
+-- Peloria prints large tiers with separators: "Mythic +2,902"
+local function ParseTierNumber(raw)
+    if not raw then return nil end
+    raw = string.gsub(raw, "[,%s]", "")
+    raw = string.gsub(raw, "%.", "")
+    local n = tonumber(raw)
+    if n and n > 0 then return n end
+    return nil
+end
+
+local function ReadScanTooltipLines(tip)
+    local lines = {}
+    local tipName = tip:GetName()
+    local n = tip:NumLines() or 0
+    for i = 1, n do
+        local left = _G[tipName .. "TextLeft" .. i]
+        local right = _G[tipName .. "TextRight" .. i]
+        local lt = left and left:GetText()
+        local rt = right and right:GetText()
+        if lt and lt ~= "" then
+            lines[#lines + 1] = CleanTooltipText(lt)
+        end
+        if rt and rt ~= "" then
+            lines[#lines + 1] = CleanTooltipText(rt)
+        end
+    end
+    return lines
+end
+
+local function TierFromTooltipLines(lines)
+    for _, text in ipairs(lines) do
+        local low = string.lower(text)
+        if string.find(low, "mythic", 1, true) then
+            -- Prefer "+N" (Soulbind / Peloria style), including comma groups
+            local raw = string.match(text, "%+%s*([%d,%.]+)")
+                or string.match(text, "[Ll]evel%s*([%d,%.]+)")
+                or string.match(text, "[Mm]ythic%s+([%d,%.]+)")
+            local n = ParseTierNumber(raw)
+            if n then return n end
+        end
+        if string.find(low, "upgrade level", 1, true) then
+            local n = ParseTierNumber(string.match(text, "([%d,%.]+)"))
+            if n then return n end
+        end
+    end
+    return nil
 end
 
 local function CreateFlatButton(parent, width, height, text)
@@ -617,12 +681,18 @@ end
 
 IsItemSoulbound = function(bag, slot)
     local tip = GetScanTooltip()
+    tip:SetOwner(UIParent, "ANCHOR_NONE")
     tip:ClearLines()
-    tip:SetBagItem(bag, slot)
-    for i = 1, tip:NumLines() do
-        local left = _G["HeySoulbindThisScanTooltipTextLeft" .. i]
-        local text = left and left:GetText()
+    if not pcall(tip.SetBagItem, tip, bag, slot) then
+        return false
+    end
+    for _, text in ipairs(ReadScanTooltipLines(tip)) do
         if text == ITEM_SOULBOUND or text == ITEM_BIND_QUEST then
+            return true
+        end
+        -- Bound wording without relying on locale globals alone
+        local low = string.lower(text)
+        if low == "soulbound" or low == "quest item" then
             return true
         end
     end
@@ -635,19 +705,18 @@ local function IsLockbox(bag, slot, itemName)
         return true
     end
     local tip = GetScanTooltip()
+    tip:SetOwner(UIParent, "ANCHOR_NONE")
     tip:ClearLines()
-    tip:SetBagItem(bag, slot)
-    for i = 1, tip:NumLines() do
-        local left = _G["HeySoulbindThisScanTooltipTextLeft" .. i]
-        local text = left and left:GetText()
-        if text then
-            local lower = string.lower(text)
-            if lower:find("lockpicking", 1, true) then
-                return true
-            end
-            if text == LOCKED or lower == "locked" then
-                return true
-            end
+    if not pcall(tip.SetBagItem, tip, bag, slot) then
+        return false
+    end
+    for _, text in ipairs(ReadScanTooltipLines(tip)) do
+        local lower = string.lower(text)
+        if lower:find("lockpicking", 1, true) then
+            return true
+        end
+        if text == LOCKED or lower == "locked" then
+            return true
         end
     end
     return false
@@ -729,33 +798,64 @@ MatchWeaponCategory = function(itemSubType)
     return nil
 end
 
+-- Mythic+ tier from the item tooltip. Same itemID exists at every level on
+-- Peloria — parse the "Mythic +N" line (N may include thousands separators).
+-- SetOwner every scan; bag/hyperlink tips can be empty until the client asks.
 GetMythicTier = function(bag, slot, itemName)
     local tip = GetScanTooltip()
+    tip:SetOwner(UIParent, "ANCHOR_NONE")
     tip:ClearLines()
-    tip:SetBagItem(bag, slot)
-    for i = 1, tip:NumLines() do
-        local left = _G["HeySoulbindThisScanTooltipTextLeft" .. i]
-        local text = left and left:GetText()
-        if text then
-            local tier = text:match("[Mm]ythic%s*%+(%d+)")
-                or text:match("[Mm]ythic%s*[Ll]evel%s*%+?(%d+)")
-                or text:match("[Mm]ythic%s*%+?(%d+)")
-                or text:match("[Uu]pgrade%s*[Ll]evel%s*:?%s*(%d+)")
-            if tier then
-                return tonumber(tier) or 0
+    pcall(tip.SetBagItem, tip, bag, slot)
+
+    local tier = TierFromTooltipLines(ReadScanTooltipLines(tip))
+
+    if not tier then
+        local link = GetContainerItemLink(bag, slot)
+        if link then
+            tip:SetOwner(UIParent, "ANCHOR_NONE")
+            tip:ClearLines()
+            if pcall(tip.SetHyperlink, tip, link) then
+                tier = TierFromTooltipLines(ReadScanTooltipLines(tip))
+            end
+            if not tier then
+                -- Bracket text sometimes embeds the tier
+                local bracket = string.match(link, "%[(.-)%]")
+                if bracket then
+                    tier = TierFromTooltipLines({ CleanTooltipText(bracket) })
+                end
             end
         end
     end
-    if itemName then
-        local lower = string.lower(itemName)
-        if lower:find("mythic", 1, true) then
-            local tier = itemName:match("%+(%d+)") or itemName:match("(%d+)")
-            if tier then
-                return tonumber(tier) or 0
-            end
-        end
+
+    if not tier and itemName then
+        tier = TierFromTooltipLines({ CleanTooltipText(itemName) })
     end
-    return 0
+
+    return tier or 0
+end
+
+-- Debug: print cleaned tooltip lines + parsed tier for a bag slot.
+local function DumpBagTooltip(bag, slot)
+    bag = tonumber(bag) or 0
+    slot = tonumber(slot) or 1
+    local tip = GetScanTooltip()
+    tip:SetOwner(UIParent, "ANCHOR_NONE")
+    tip:ClearLines()
+    if not pcall(tip.SetBagItem, tip, bag, slot) then
+        Print("SetBagItem failed for bag " .. bag .. " slot " .. slot)
+        return
+    end
+    local link = GetContainerItemLink(bag, slot)
+    Print("Tooltip bag " .. bag .. " slot " .. slot .. " (" .. (link or "?") .. ")")
+    local lines = ReadScanTooltipLines(tip)
+    if #lines == 0 then
+        Print("  (no lines — hover the item once, then /hst tip again)")
+        return
+    end
+    for i, text in ipairs(lines) do
+        Print("  [" .. i .. "] " .. text)
+    end
+    Print("  => mythic tier: " .. tostring(TierFromTooltipLines(lines) or "nil"))
 end
 
 NormalizeRouteList = function(routeKey)
@@ -923,115 +1023,149 @@ local function TryCandidate(charKey, checkFn, assigned, itemID, mythicTier)
     return charKey, data
 end
 
--- assigned tracks itemID@mythicTier already claimed by a recipient this scan
-ResolveRecipient = function(routeKey, weaponCategory, relicIndex, reqLevel, category, itemID, mythicTier, assigned)
+-- Ordered eligible recipients for a route (class checks only — no mythic skip).
+-- Used for scan assignment and mailbox-full failover to the next backup.
+local function ListEligibleRecipients(routeKey, weaponCategory, relicIndex, reqLevel, category)
     EnsureDB()
-    assigned = assigned or {}
-    mythicTier = mythicTier or 0
-    local me = CurrentPlayerKey()
+    local out = {}
+    local seen = {}
 
-    local function accept(charKey, data)
-        if charKey and data then
-            MarkRecipientHas(assigned, charKey, itemID, mythicTier)
-            return charKey, data
+    local function push(charKey, checkFn)
+        if not charKey or seen[charKey] or charKey == CurrentPlayerKey() then
+            return
         end
-        return nil
+        local data = HeySoulbindThisDB.characters[charKey]
+        if not data or not data.name then
+            return
+        end
+        if checkFn and not checkFn(data) then
+            return
+        end
+        seen[charKey] = true
+        out[#out + 1] = { key = charKey, data = data }
     end
 
     if routeKey == "Weapon" then
         for _, entry in ipairs(GetAssigneesInPriorityOrder()) do
-            local key, data = TryCandidate(entry.key, function(d)
+            push(entry.key, function(d)
                 return CanUseWeapon(d.classFile, weaponCategory)
-            end, assigned, itemID, mythicTier)
-            if key then return accept(key, data) end
+            end)
         end
-        return nil
+        return out
     end
 
     if routeKey == "Relic" then
         local allowed = CLASS_RELICS[relicIndex]
-        if not allowed then return nil end
+        if not allowed then return out end
         for _, entry in ipairs(GetAssigneesInPriorityOrder()) do
-            local key, data = TryCandidate(entry.key, function(d)
+            push(entry.key, function(d)
                 return allowed[d.classFile]
-            end, assigned, itemID, mythicTier)
-            if key then return accept(key, data) end
+            end)
         end
-        return nil
+        return out
     end
 
     local function isTransitionalMailWearer(cf)
         return cf == "WARRIOR" or cf == "PALADIN" or cf == "DEATHKNIGHT"
     end
 
-    -- Pre-40 mail: prefer plate-route backups (warr/pala/dk), then mail wearers
     if routeKey == "Mail" and (tonumber(reqLevel) or 0) < 40 then
         for _, charKey in ipairs(GetRouteCandidates("Plate")) do
-            local key, data = TryCandidate(charKey, function(d)
+            push(charKey, function(d)
                 return isTransitionalMailWearer(d.classFile)
                     and CanUseArmorType(d.classFile, ARMOR_SUB.MAIL, reqLevel)
-            end, assigned, itemID, mythicTier)
-            if key then return accept(key, data) end
+            end)
         end
         for _, entry in ipairs(GetAssigneesInPriorityOrder()) do
-            local key, data = TryCandidate(entry.key, function(d)
+            push(entry.key, function(d)
                 return isTransitionalMailWearer(d.classFile)
                     and CanUseArmorType(d.classFile, ARMOR_SUB.MAIL, reqLevel)
-            end, assigned, itemID, mythicTier)
-            if key then return accept(key, data) end
+            end)
         end
         for _, charKey in ipairs(GetRouteCandidates("Mail")) do
-            local key, data = TryCandidate(charKey, function(d)
+            push(charKey, function(d)
                 return CanUseArmorType(d.classFile, ARMOR_SUB.MAIL, reqLevel)
-            end, assigned, itemID, mythicTier)
-            if key then return accept(key, data) end
+            end)
         end
-        return nil
+        return out
     end
 
     if routeKey == "Lockbox" then
         for _, charKey in ipairs(GetRouteCandidates("Lockbox")) do
-            local key, data = TryCandidate(charKey, function(d)
+            push(charKey, function(d)
                 return d.classFile == "ROGUE"
-            end, assigned, itemID, mythicTier)
-            if key then return accept(key, data) end
+            end)
         end
-        return nil
+        return out
     end
 
     if routeKey == "Shield" then
         for _, charKey in ipairs(GetRouteCandidates("Shield")) do
-            local key, data = TryCandidate(charKey, function(d)
+            push(charKey, function(d)
                 return CLASS_SHIELDS[d.classFile]
-            end, assigned, itemID, mythicTier)
-            if key then return accept(key, data) end
+            end)
         end
-        return nil
+        return out
     end
 
     if routeKey == "Cloth" or routeKey == "Leather" or routeKey == "Mail" or routeKey == "Plate" then
         local armorIdx = ARMOR_SUB[string.upper(routeKey)]
         for _, charKey in ipairs(GetRouteCandidates(routeKey)) do
-            local key, data = TryCandidate(charKey, function(d)
+            push(charKey, function(d)
                 return CanUseArmorType(d.classFile, armorIdx, reqLevel)
-            end, assigned, itemID, mythicTier)
-            if key then return accept(key, data) end
+            end)
         end
-        return nil
-    end
-
-    -- Wildcard / Offhand - any class, walk backups
-    if routeKey == "Wildcard" or routeKey == "Offhand" then
-        for _, charKey in ipairs(GetRouteCandidates(routeKey)) do
-            local key, data = TryCandidate(charKey, nil, assigned, itemID, mythicTier)
-            if key then return accept(key, data) end
-        end
-        return nil
+        return out
     end
 
     for _, charKey in ipairs(GetRouteCandidates(routeKey)) do
-        local key, data = TryCandidate(charKey, nil, assigned, itemID, mythicTier)
-        if key then return accept(key, data) end
+        push(charKey, nil)
+    end
+    return out
+end
+
+-- assigned tracks itemID@mythicTier already claimed by a recipient this scan
+ResolveRecipient = function(routeKey, weaponCategory, relicIndex, reqLevel, category, itemID, mythicTier, assigned)
+    EnsureDB()
+    assigned = assigned or {}
+    mythicTier = mythicTier or 0
+
+    for _, entry in ipairs(ListEligibleRecipients(routeKey, weaponCategory, relicIndex, reqLevel, category)) do
+        local key, data = TryCandidate(entry.key, nil, assigned, itemID, mythicTier)
+        if key then
+            MarkRecipientHas(assigned, key, itemID, mythicTier)
+            return key, data
+        end
+    end
+    return nil
+end
+
+local function IsRecipientCapError(msg)
+    if not msg or msg == "" then return false end
+    if ERR_MAIL_REACHED_CAP and msg == ERR_MAIL_REACHED_CAP then
+        return true
+    end
+    local low = string.lower(msg)
+    if string.find(low, "unique mail recipients", 1, true) then
+        return true
+    end
+    if string.find(low, "in-game cap", 1, true) then
+        return true
+    end
+    return false
+end
+
+-- Next route backup after a mailbox-full / unique-recipient-cap failure.
+local function PickMailFailover(entry)
+    if not entry or not entry.routeKey then return nil end
+    local chain = ListEligibleRecipients(
+        entry.routeKey, entry.weaponCategory, entry.relicIndex, entry.reqLevel, entry.category)
+    local tried = entry.triedRecipients or {}
+    for _, cand in ipairs(chain) do
+        local name = cand.data.name
+        if name and not tried[name] and not mailBlockedRecipients[name] then
+            return cand.key, cand.data
+        end
     end
     return nil
 end
@@ -1043,6 +1177,20 @@ ScanBags = function()
     local results = {}
     EnsureDB()
     local assigned = {}
+
+    -- Prime bag tooltips once. Peloria often withholds custom Mythic/soulbind
+    -- lines until the client has requested the item at least once.
+    for bag = 0, 4 do
+        local numSlots = GetContainerNumSlots(bag) or 0
+        for slot = 1, numSlots do
+            if GetContainerItemLink(bag, slot) then
+                local tip = GetScanTooltip()
+                tip:SetOwner(UIParent, "ANCHOR_NONE")
+                tip:ClearLines()
+                pcall(tip.SetBagItem, tip, bag, slot)
+            end
+        end
+    end
 
     for bag = 0, 4 do
         local numSlots = GetContainerNumSlots(bag) or 0
@@ -1083,6 +1231,9 @@ ScanBags = function()
                                 itemID = itemID,
                                 category = category,
                                 routeKey = routeKey,
+                                weaponCategory = weaponCategory,
+                                relicIndex = relicIndex,
+                                reqLevel = reqLevel,
                                 mythicTier = mythicTier,
                                 recipKey = recipKey,
                                 recipName = recipData.name,
@@ -1196,16 +1347,146 @@ local function AttachItem(bag, slot, attachIndex)
     return false
 end
 
+-- After a successful send, bag slots compact. Relocate each queued item by
+-- itemID (+ mythic tier when known) so later batches still find the gear.
+local function FindSendableSlot(itemID, mythicTier, preferBag, preferSlot, usedSlots)
+    if not itemID then return nil end
+
+    local function slotOk(bag, slot)
+        local key = bag .. ":" .. slot
+        if usedSlots and usedSlots[key] then
+            return false
+        end
+        local link = GetContainerItemLink(bag, slot)
+        if not link or GetItemIDFromLink(link) ~= itemID then
+            return false
+        end
+        local want = tonumber(mythicTier) or 0
+        if want > 0 then
+            local got = GetMythicTier(bag, slot, nil) or 0
+            -- Only reject when we positively read a different tier; 0 means
+            -- tooltip not ready yet and should not block attach.
+            if got > 0 and got ~= want then
+                return false
+            end
+        end
+        return true
+    end
+
+    if preferBag and preferSlot and slotOk(preferBag, preferSlot) then
+        return preferBag, preferSlot
+    end
+
+    for bag = 0, 4 do
+        local numSlots = GetContainerNumSlots(bag) or 0
+        for slot = 1, numSlots do
+            if slotOk(bag, slot) then
+                return bag, slot
+            end
+        end
+    end
+    return nil
+end
+
+local function RelocateEntry(entry, usedSlots)
+    local bag, slot = FindSendableSlot(
+        entry.itemID, entry.mythicTier, entry.bag, entry.slot, usedSlots)
+    if not bag then
+        return false
+    end
+    entry.bag = bag
+    entry.slot = slot
+    if usedSlots then
+        usedSlots[bag .. ":" .. slot] = true
+    end
+    return true
+end
+
 StopSending = function()
     stopRequested = true
     sending = false
     openingMail = false
     sendQueue = {}
+    mailBlockedRecipients = {}
+    lastMailUIError = nil
     if panel and panel.stopBtn then
         panel.stopBtn:Disable()
     end
     UpdateSendButton()
     Print("Stopped.")
+end
+
+local function PrependQueueGrouped(entries)
+    if not entries or #entries == 0 then return end
+    local byRecip = {}
+    local order = {}
+    for _, entry in ipairs(entries) do
+        local name = entry.recipient
+        if not byRecip[name] then
+            byRecip[name] = {}
+            order[#order + 1] = name
+        end
+        byRecip[name][#byRecip[name] + 1] = entry
+    end
+    local rebuilt = {}
+    for _, name in ipairs(order) do
+        for _, item in ipairs(byRecip[name]) do
+            rebuilt[#rebuilt + 1] = item
+        end
+    end
+    for _, item in ipairs(sendQueue) do
+        rebuilt[#rebuilt + 1] = item
+    end
+    sendQueue = rebuilt
+end
+
+-- Reroute a failed batch to route backups. Returns true if any items were requeued.
+local function FailoverBatch(batch, failedRecipient)
+    mailBlockedRecipients[failedRecipient] = true
+    local rerouted = {}
+    local stranded = 0
+    for _, entry in ipairs(batch) do
+        entry.triedRecipients = entry.triedRecipients or {}
+        entry.triedRecipients[failedRecipient] = true
+        local key, data = PickMailFailover(entry)
+        if key and data then
+            entry.triedRecipients[data.name] = true
+            entry.recipient = data.name
+            entry.recipKey = key
+            entry.recipClass = data.classFile
+            rerouted[#rerouted + 1] = entry
+        else
+            stranded = stranded + 1
+        end
+    end
+
+    if #rerouted > 0 then
+        PrependQueueGrouped(rerouted)
+        -- Extra batches for the rerouted items
+        local i = 1
+        local extra = 0
+        while i <= #rerouted do
+            extra = extra + 1
+            local r = rerouted[i].recipient
+            local n = 0
+            while i <= #rerouted and rerouted[i].recipient == r and n < MAX_ATTACHMENTS do
+                n = n + 1
+                i = i + 1
+            end
+        end
+        sendBatchTotal = sendBatchTotal + extra
+        Print(string.format(
+            "|cffff9900%s can't receive mail (unique recipient cap / full inbox). Rerouting %d item(s) to backup(s)...|r",
+            failedRecipient, #rerouted))
+    end
+
+    if stranded > 0 then
+        Print(string.format(
+            "|cffff0000%s: %d item(s) have no backup recipient. Empty that character's mailbox, then send again.|r",
+            failedRecipient, stranded))
+    end
+
+    return #rerouted > 0
 end
 
 SendNextBatch = function()
@@ -1225,6 +1506,8 @@ SendNextBatch = function()
     if #sendQueue == 0 then
         sending = false
         ClearMailAttachments()
+        mailBlockedRecipients = {}
+        lastMailUIError = nil
         Print("|cff00ff00Done.|r All batches sent.")
         if panel and panel.stopBtn then
             panel.stopBtn:Disable()
@@ -1232,6 +1515,19 @@ SendNextBatch = function()
         UpdateSendButton()
         RefreshPreview()
         return
+    end
+
+    local function ContinueAfterDelay(extraDelay)
+        local f = CreateFrame("Frame")
+        local t = 0
+        local need = (extraDelay or 0) + BATCH_DELAY
+        f:SetScript("OnUpdate", function(self, e)
+            t = t + e
+            if t >= need then
+                self:SetScript("OnUpdate", nil)
+                SendNextBatch()
+            end
+        end)
     end
 
     -- Peek recipient for this batch - keep same recipient until 12 or recipient changes
@@ -1244,6 +1540,13 @@ SendNextBatch = function()
         batch[#batch + 1] = table.remove(sendQueue, 1)
     end
 
+    -- Skip recipients already known blocked this session - go straight to backups
+    if mailBlockedRecipients[recipient] then
+        FailoverBatch(batch, recipient)
+        ContinueAfterDelay(0)
+        return
+    end
+
     sendBatchIndex = sendBatchIndex + 1
     Print(string.format("Batch %d/%d -> %s (%d item(s))...",
         sendBatchIndex, sendBatchTotal, recipient, #batch))
@@ -1254,31 +1557,31 @@ SendNextBatch = function()
         MailFrameTab_OnClick(MailFrameTab2, 2)
     end
 
-    local attached = 0
-    for i, entry in ipairs(batch) do
-        local link = GetContainerItemLink(entry.bag, entry.slot)
-        if link and GetItemIDFromLink(link) == entry.itemID then
-            if AttachItem(entry.bag, entry.slot, i) then
-                attached = attached + 1
+    -- Relocate every item - prior sends compact bag slots
+    local usedSlots = {}
+    local attachedEntries = {}
+    local deferred = {}
+    for _, entry in ipairs(batch) do
+        if RelocateEntry(entry, usedSlots) and AttachItem(entry.bag, entry.slot, #attachedEntries + 1) then
+            attachedEntries[#attachedEntries + 1] = entry
+        else
+            entry.attachRetries = (entry.attachRetries or 0) + 1
+            if entry.attachRetries <= 2 then
+                deferred[#deferred + 1] = entry
+            else
+                Print("|cffff9900Could not attach item " .. tostring(entry.itemID)
+                    .. " - left in bags.|r")
             end
         end
     end
 
-    local function ContinueAfterDelay()
-        local f = CreateFrame("Frame")
-        local t = 0
-        f:SetScript("OnUpdate", function(self, e)
-            t = t + e
-            if t >= BATCH_DELAY then
-                self:SetScript("OnUpdate", nil)
-                SendNextBatch()
-            end
-        end)
+    if #deferred > 0 then
+        PrependQueueGrouped(deferred)
     end
 
-    if attached == 0 then
-        Print("|cffff9900Batch had no attachable items - skipping.|r")
-        ContinueAfterDelay()
+    if #attachedEntries == 0 then
+        Print("|cffff9900Batch had no attachable items - retrying remaining queue.|r")
+        ContinueAfterDelay(BAG_SETTLE_DELAY)
         return
     end
 
@@ -1286,6 +1589,7 @@ SendNextBatch = function()
     if GetMoney() < postage then
         sending = false
         ClearMailAttachments()
+        PrependQueueGrouped(attachedEntries)
         Print("|cffff0000Not enough money for postage. Send cancelled.|r")
         if panel and panel.stopBtn then
             panel.stopBtn:Disable()
@@ -1298,6 +1602,7 @@ SendNextBatch = function()
     if SendMailNameEditBox then SendMailNameEditBox:SetText(recipient) end
     if SendMailSubjectEditBox then SendMailSubjectEditBox:SetText(subject) end
     if SendMailBodyEditBox then SendMailBodyEditBox:SetText("") end
+    lastMailUIError = nil
     SendMail(recipient, subject, "")
 
     local f = CreateFrame("Frame")
@@ -1305,24 +1610,60 @@ SendNextBatch = function()
     local waiting = true
     f:RegisterEvent("MAIL_SEND_SUCCESS")
     f:RegisterEvent("MAIL_FAILED")
-    f:SetScript("OnEvent", function(self, event)
+    f:RegisterEvent("UI_ERROR_MESSAGE")
+    f:SetScript("OnEvent", function(self, event, arg1)
+        if event == "UI_ERROR_MESSAGE" then
+            if arg1 and arg1 ~= "" then
+                lastMailUIError = arg1
+            end
+            return
+        end
         if event == "MAIL_SEND_SUCCESS" then
             waiting = false
             self:UnregisterAllEvents()
             self:SetScript("OnEvent", nil)
             self:SetScript("OnUpdate", nil)
-            ContinueAfterDelay()
+            ContinueAfterDelay(BAG_SETTLE_DELAY)
         elseif event == "MAIL_FAILED" then
             waiting = false
-            sending = false
-            self:UnregisterAllEvents()
-            self:SetScript("OnEvent", nil)
-            self:SetScript("OnUpdate", nil)
-            Print("|cffff0000Mail failed. Remaining batches cancelled.|r")
-            if panel and panel.stopBtn then
-                panel.stopBtn:Disable()
-            end
-            UpdateSendButton()
+            self:UnregisterEvent("MAIL_SEND_SUCCESS")
+            self:UnregisterEvent("MAIL_FAILED")
+            local decideAt = 0
+            self:SetScript("OnUpdate", function(frame, e)
+                decideAt = decideAt + e
+                if decideAt < 0.25 then return end
+                frame:UnregisterAllEvents()
+                frame:SetScript("OnEvent", nil)
+                frame:SetScript("OnUpdate", nil)
+                ClearMailAttachments()
+
+                local err = lastMailUIError
+                if IsRecipientCapError(err) then
+                    FailoverBatch(attachedEntries, recipient)
+                    if #sendQueue == 0 then
+                        sending = false
+                        Print("|cffff0000Send stopped - empty " .. recipient
+                            .. "'s mailbox (or add a route backup), then try again.|r")
+                        if panel and panel.stopBtn then
+                            panel.stopBtn:Disable()
+                        end
+                        UpdateSendButton()
+                        RefreshPreview()
+                    else
+                        ContinueAfterDelay(0)
+                    end
+                else
+                    sending = false
+                    Print("|cffff0000Mail failed"
+                        .. (err and (": " .. err) or "")
+                        .. ". Remaining batches cancelled.|r")
+                    sendQueue = {}
+                    if panel and panel.stopBtn then
+                        panel.stopBtn:Disable()
+                    end
+                    UpdateSendButton()
+                end
+            end)
         end
     end)
     f:SetScript("OnUpdate", function(self, e)
@@ -1333,7 +1674,7 @@ SendNextBatch = function()
             self:SetScript("OnEvent", nil)
             self:SetScript("OnUpdate", nil)
             Print("|cffff9900No mail success event - continuing anyway.|r")
-            SendNextBatch()
+            ContinueAfterDelay(BAG_SETTLE_DELAY)
         end
     end)
 end
@@ -1345,7 +1686,9 @@ StartSending = function()
         return
     end
 
-    -- Build queue grouped by recipient (priority order of first appearance)
+    mailBlockedRecipients = {}
+    lastMailUIError = nil
+
     local byRecip = {}
     local recipOrder = {}
     for _, entry in ipairs(previewItems) do
@@ -1354,11 +1697,22 @@ StartSending = function()
                 byRecip[entry.recipName] = {}
                 recipOrder[#recipOrder + 1] = entry.recipName
             end
+            local tried = {}
+            tried[entry.recipName] = true
             byRecip[entry.recipName][#byRecip[entry.recipName] + 1] = {
                 bag = entry.bag,
                 slot = entry.slot,
                 itemID = entry.itemID,
                 recipient = entry.recipName,
+                recipKey = entry.recipKey,
+                routeKey = entry.routeKey,
+                weaponCategory = entry.weaponCategory,
+                relicIndex = entry.relicIndex,
+                reqLevel = entry.reqLevel,
+                category = entry.category,
+                mythicTier = entry.mythicTier,
+                triedRecipients = tried,
+                attachRetries = 0,
             }
         end
     end
@@ -1379,7 +1733,6 @@ StartSending = function()
     stopRequested = false
     sending = true
     sendBatchTotal = 0
-    -- Count batches
     local i = 1
     while i <= #queue do
         sendBatchTotal = sendBatchTotal + 1
@@ -2569,7 +2922,10 @@ SLASH_HeySoulbindThis1 = "/hst"
 SLASH_HeySoulbindThis2 = "/heysoulbind"
 SlashCmdList["HeySoulbindThis"] = function(msg)
     msg = strtrim(string.lower(msg or ""))
-    if msg == "scan" or msg == "refresh" then
+    local tipBag, tipSlot = string.match(msg, "^tip%s*(%d*)%s*(%d*)$")
+    if tipBag then
+        DumpBagTooltip(tipBag ~= "" and tipBag or 0, tipSlot ~= "" and tipSlot or 1)
+    elseif msg == "scan" or msg == "refresh" then
         if panel and panel:IsShown() then
             RefreshPreview()
         else
@@ -2577,6 +2933,8 @@ SlashCmdList["HeySoulbindThis"] = function(msg)
         end
     elseif msg == "stop" then
         if sending or openingMail then StopSending() end
+    elseif msg == "help" then
+        Print("Commands: /hst  |  /hst scan  |  /hst stop  |  /hst tip [bag] [slot]")
     else
         TogglePanel()
     end
